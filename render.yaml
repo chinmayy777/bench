@@ -1,0 +1,51 @@
+# Bench + three comparable vendors, all free-tier.
+services:
+  - type: web
+    name: bench
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      - key: BASE_URL
+        sync: false
+      - key: PAYER_MODE
+        value: mock
+      - key: ALLOW_LOCAL_TARGETS
+        value: "0"
+      - key: DB_PATH
+        value: /tmp/bench.db
+      - key: DEMO_TRIGGER
+        value: "1"
+  - type: web
+    name: vendor-cheap
+    runtime: docker
+    dockerfilePath: ./Dockerfile.vendor
+    plan: free
+    envVars:
+      - {key: PRICE, value: "0.02"}
+      - {key: LATENCY_MS, value: "20"}
+      - {key: RICHNESS, value: "0"}
+      - {key: NETWORK, value: mock}
+      - {key: FACILITATOR, value: mock}
+  - type: web
+    name: vendor-mid
+    runtime: docker
+    dockerfilePath: ./Dockerfile.vendor
+    plan: free
+    envVars:
+      - {key: PRICE, value: "0.05"}
+      - {key: LATENCY_MS, value: "120"}
+      - {key: RICHNESS, value: "2"}
+      - {key: NETWORK, value: mock}
+      - {key: FACILITATOR, value: mock}
+  - type: web
+    name: vendor-rich
+    runtime: docker
+    dockerfilePath: ./Dockerfile.vendor
+    plan: free
+    envVars:
+      - {key: PRICE, value: "0.15"}
+      - {key: LATENCY_MS, value: "400"}
+      - {key: RICHNESS, value: "3"}
+      - {key: NETWORK, value: mock}
+      - {key: FACILITATOR, value: mock}

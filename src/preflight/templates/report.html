@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PreFlight {{ r.overall }} — {{ r.target_url }}</title>
+<link rel="stylesheet" href="/static/report.css">
+</head>
+<body>
+<main class="card">
+  <header class="masthead">
+    <div class="ident">
+      <span class="wordmark">ASP&nbsp;PreFlight</span>
+      <span class="sub">commerce-grade checks for paid agents</span>
+    </div>
+    <div class="stamp stamp--{{ 'pass' if r.overall == 'PASS' else 'fail' }}">{{ r.overall }}</div>
+  </header>
+
+  <dl class="meta">
+    <div><dt>Target</dt><dd class="mono">{{ r.target_url }}</dd></div>
+    <div><dt>Run</dt><dd class="mono">{{ r.id }} · {{ r.created_at }}</dd></div>
+    <div><dt>Result</dt><dd>{{ counts['pass'] }} pass · {{ counts['fail'] }} fail · {{ counts['warn'] }} warn · {{ counts['skip'] }} skipped</dd></div>
+    {% if r.spend_usdt %}<div><dt>Test spend</dt><dd>{{ r.spend_usdt }} (non-mainnet)</dd></div>{% endif %}
+  </dl>
+
+  <section class="checks">
+    {% for c in r.results %}
+    <article class="row row--{{ c.status.value }}">
+      <span class="cid">{{ c.id }}</span>
+      <div class="body">
+        <div class="line">
+          <span class="name">{{ c.name }}</span>
+          <span class="dots" aria-hidden="true"></span>
+          <span class="chip chip--{{ c.status.value }}">{{ c.status.value }}</span>
+        </div>
+        <p class="summary">{{ c.summary }}</p>
+        {% if c.evidence %}
+        <details>
+          <summary>evidence · {{ c.duration_ms }} ms</summary>
+          <pre class="mono">{{ c.evidence | tojson(indent=2) }}</pre>
+        </details>
+        {% endif %}
+      </div>
+    </article>
+    {% endfor %}
+  </section>
+
+  {% if r.tx_refs %}
+  <section class="txs">
+    <h2>Settlement references</h2>
+    {% for t in r.tx_refs %}<code class="mono">{{ t }}</code>{% endfor %}
+  </section>
+  {% endif %}
+
+  <footer>
+    <span>Deterministic protocol checks. Same input, same verdict.</span>
+    <span>Run it on your own service before you list.</span>
+  </footer>
+</main>
+</body>
+</html>

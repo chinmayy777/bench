@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bench — {{ c.task }}</title>
+<link rel="stylesheet" href="/static/report.css">
+<style>
+.lead{display:flex;align-items:baseline;gap:12px;margin:18px 0 6px}
+.lead .medal{font-size:13px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--green);background:var(--green-bg);padding:4px 12px;border-radius:99px}
+.board{display:grid;gap:12px;margin-top:18px}
+.cand{border:1px solid var(--line);border-radius:10px;padding:16px 18px;background:var(--card)}
+.cand.win{border-color:var(--green);box-shadow:0 0 0 1px var(--green) inset}
+.cand.dead{opacity:.72}
+.crow{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.rank{flex:none;width:30px;height:30px;display:grid;place-items:center;border-radius:8px;
+  font-weight:800;background:var(--slate-bg);color:var(--slate)}
+.cand.win .rank{background:var(--green-bg);color:var(--green)}
+.url{font-family:ui-monospace,Menlo,monospace;font-size:.86em;word-break:break-all;flex:1;min-width:180px}
+.scorebar{flex:none;width:120px;height:8px;border-radius:99px;background:var(--paper);overflow:hidden}
+.scorebar>span{display:block;height:100%;background:var(--green)}
+.score{flex:none;font-weight:800;width:44px;text-align:right}
+.metrics{display:flex;gap:20px;margin-top:10px;flex-wrap:wrap;color:var(--muted);font-size:14px}
+.metrics b{color:var(--ink)}
+.deadnote{margin-top:8px;font-size:13px;color:var(--amber)}
+</style>
+</head>
+<body>
+<main class="card">
+  <header class="masthead">
+    <div class="ident">
+      <span class="wordmark">Bench</span>
+      <span class="sub">buyer-side value comparison for paid agents</span>
+    </div>
+  </header>
+
+  <dl class="meta">
+    <div><dt>Task</dt><dd>{{ c.task }}</dd></div>
+    <div><dt>Run</dt><dd class="mono">{{ c.id }} · {{ c.created_at }}</dd></div>
+    <div><dt>Candidates</dt><dd>{{ c.candidates|length }} compared</dd></div>
+    {% if c.total_spend_usdt %}<div><dt>Test spend</dt><dd>{{ c.total_spend_usdt }} (non-mainnet)</dd></div>{% endif %}
+  </dl>
+
+  {% if c.winner_url %}
+  <div class="lead"><span class="medal">Best value</span><span class="mono">{{ c.winner_url }}</span></div>
+  {% else %}
+  <div class="lead"><span class="medal" style="color:var(--red);background:var(--red-bg)">No usable service</span></div>
+  {% endif %}
+
+  <div class="board">
+    {% for cand in c.candidates %}
+    <article class="cand {{ 'win' if cand.target_url == c.winner_url else '' }} {{ 'dead' if not cand.usable else '' }}">
+      <div class="crow">
+        <span class="rank">{{ loop.index }}</span>
+        <span class="url">{{ cand.target_url }}</span>
+        {% if cand.usable %}
+        <span class="scorebar"><span style="width: {{ cand.value_score }}%"></span></span>
+        <span class="score">{{ cand.value_score }}</span>
+        {% endif %}
+      </div>
+      {% if cand.usable %}
+      <div class="metrics">
+        <span>price <b>{{ cand.price_usdt if cand.price_usdt is not none else '—' }}</b></span>
+        <span>latency <b>{{ cand.latency_ms }}ms</b></span>
+        <span>delivered <b>{{ cand.delivered_chars }} chars</b></span>
+        {% if cand.tx_ref %}<span>tx <b class="mono">{{ cand.tx_ref[:28] }}…</b></span>{% endif %}
+      </div>
+      {% else %}
+      <div class="deadnote">{{ cand.notes | join(', ') or 'not usable' }}</div>
+      {% endif %}
+    </article>
+    {% endfor %}
+  </div>
+
+  <footer>
+    <span>Real purchases, transparent scoring: price {{ (0.45*100)|int }}% · latency {{ (0.25*100)|int }}% · delivery {{ (0.30*100)|int }}%.</span>
+    <span>Let your agent buy the best, not the first.</span>
+  </footer>
+</main>
+</body>
+</html>
