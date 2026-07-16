@@ -156,10 +156,15 @@ async def demo_run(target_url: str, paid_tool: str = "market_pulse",
         f'<p><a href="{link}">{link}</a></p>'
     )
 
+
 @app.get("/api/demo-compare", response_class=HTMLResponse)
 async def demo_compare(targets: str, paid_tool: str = "market_pulse",
                        task: str = "market pulse feed") -> HTMLResponse:
-    """Browser-triggerable comparison (GET). Enabled only when DEMO_TRIGGER=1."""
+    """Browser-triggerable comparison (GET). Enabled only when DEMO_TRIGGER=1.
+
+    `targets` is a comma-separated list of vendor MCP URLs. Runs the full compare
+    (a real purchase from each on testnet) and redirects to the leaderboard page.
+    """
     import os
     if os.getenv("DEMO_TRIGGER", "0").lower() not in {"1", "true", "yes"}:
         raise HTTPException(404, "not found")
@@ -180,6 +185,17 @@ async def demo_compare(targets: str, paid_tool: str = "market_pulse",
         f'<p><a href="{link}">{link}</a></p>'
     )
 
-@app.get("/")
-async def index() -> RedirectResponse:
-    return RedirectResponse("/healthz")
+
+@app.get("/", response_class=HTMLResponse)
+async def index() -> HTMLResponse:
+    import os
+    sample_tx = os.getenv(
+        "SAMPLE_TX",
+        "0x2f0ebf349f97b134557172955907438bb0545cc755e9c7d403ec9a4d4f9453df")
+    ctx = {
+        "listing_url": os.getenv("LISTING_URL", "https://www.okx.ai/"),
+        "sample_compare_url": os.getenv("SAMPLE_COMPARE_URL", ""),
+        "sample_tx_url": f"https://sepolia.basescan.org/tx/{sample_tx}",
+        "sample_tx_short": f"{sample_tx[:22]}…{sample_tx[-6:]}",
+    }
+    return HTMLResponse(jinja.get_template("landing.html").render(**ctx))

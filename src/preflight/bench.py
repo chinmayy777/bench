@@ -131,18 +131,42 @@ def _pct(new: float, base: float) -> str:
 
 
 def _assign_verdicts(usable: list["Candidate"]) -> None:
-    """Give each usable candidate a one-line plain-language rationale."""
+    """Give each usable candidate a one-line plain-language rationale.
+
+    Strictly honest: the winner only claims an axis it actually leads. When it
+    wins on the combination rather than any single axis, the line says exactly
+    that without naming a dimension it didn't top.
+    """
     winner = max(usable, key=lambda c: c.value_score)
-    # winner: name what it leads on
+    prices = [c.price_usdt for c in usable if c.price_usdt is not None]
+    lats = [c.latency_ms for c in usable if c.latency_ms is not None]
+    delivs = [c.delivered_chars for c in usable if c.delivered_chars is not None]
+
+    # Latency measurements are noisy (hosting overhead); treat a lead as real
+    # only if the winner is meaningfully faster than the next-best, not just
+    # nominally lowest.
+    def leads_latency() -> bool:
+        if winner.latency_ms is None or len(lats) < 2:
+            return False
+        others = sorted(x for x in lats if x is not winner.latency_ms)
+        nxt = others[0] if others else winner.latency_ms
+        return winner.latency_ms <= nxt * 0.85  # ≥15% faster than next-best
+
     leads = []
-    if winner.price_usdt == min(c.price_usdt for c in usable if c.price_usdt is not None):
-        leads.append("cheapest")
-    if winner.latency_ms == min(c.latency_ms for c in usable if c.latency_ms is not None):
+    if prices and winner.price_usdt == min(prices):
+        leads.append("lowest price")
+    if leads_latency():
         leads.append("fastest")
-    if winner.delivered_chars == max(c.delivered_chars for c in usable if c.delivered_chars is not None):
-        leads.append("most complete")
-    winner.verdict = ("Best balance of price, speed, and delivery"
-                      if not leads else "Best value \u2014 " + ", ".join(leads))
+    if delivs and winner.delivered_chars == max(delivs):
+        leads.append("most complete delivery")
+
+    if len(leads) >= 2:
+        winner.verdict = "Best value — " + " and ".join(leads)
+    elif len(leads) == 1:
+        winner.verdict = f"Best value — {leads[0]}, and strong on the rest"
+    else:
+        winner.verdict = "Best value — wins on the overall price-to-delivery balance"
+
     # losers: the single sharpest reason they lost to the winner
     for c in usable:
         if c is winner:
@@ -150,7 +174,7 @@ def _assign_verdicts(usable: list["Candidate"]) -> None:
         bits = []
         if c.price_usdt and winner.price_usdt and c.price_usdt > winner.price_usdt:
             bits.append(f"costs {_pct(c.price_usdt, winner.price_usdt)}")
-        if c.latency_ms and winner.latency_ms and c.latency_ms > winner.latency_ms * 1.1:
+        if c.latency_ms and winner.latency_ms and c.latency_ms > winner.latency_ms * 1.15:
             bits.append(f"{_pct(c.latency_ms, winner.latency_ms)} latency")
         gain = ""
         if c.delivered_chars and winner.delivered_chars and c.delivered_chars > winner.delivered_chars:
@@ -158,9 +182,9 @@ def _assign_verdicts(usable: list["Candidate"]) -> None:
         if bits:
             c.verdict = (gain + " and ".join(bits) + " than the winner").capitalize()
         elif c.price_usdt and winner.price_usdt and c.price_usdt < winner.price_usdt:
-            c.verdict = "Cheaper, but thinner delivery drags its value"
+            c.verdict = "Cheaper, but thinner delivery drags its value down"
         else:
-            c.verdict = "Edged out on the price\u2013speed\u2013delivery balance"
+            c.verdict = "Edged out on the overall balance"
 
 
 async def compare_services(
