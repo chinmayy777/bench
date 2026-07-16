@@ -87,7 +87,10 @@ def load_comparison(comp_id: str):
         row = con.execute("SELECT * FROM comparisons WHERE id=?", (comp_id,)).fetchone()
     if row is None:
         return None
-    cands = [Candidate(**d) for d in _json.loads(row["candidates_json"])]
+    import dataclasses
+    _fields = {f.name for f in dataclasses.fields(Candidate)}
+    cands = [Candidate(**{k: v for k, v in d.items() if k in _fields})
+             for d in _json.loads(row["candidates_json"])]
     return Comparison(row["id"], row["created_at"], row["task"], cands,
                       row["winner_url"], row["total_spend_usdt"],
                       _json.loads(row["tx_refs_json"]))

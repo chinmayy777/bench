@@ -42,6 +42,7 @@ class Candidate:
     report_id: str
     notes: list[str] = field(default_factory=list)
     value_score: float = 0.0  # 0..100, filled by ranking
+    verdict: str = ""  # plain-language reason, filled by ranking
 
     @property
     def usable(self) -> bool:
@@ -111,6 +112,55 @@ def _rank(candidates: list[Candidate]) -> None:
              + W_LATENCY * norm(c.latency_ms, l_lo, l_hi, invert=True)
              + W_DELIVERY * norm(c.delivered_chars, d_lo, d_hi))
         c.value_score = round(s * 100, 1)
+
+    _assign_verdicts(usable)
+
+
+def _pct(new: float, base: float) -> str:
+    """Human 'Nx more' / 'N% more' phrasing for new vs base."""
+    if base in (None, 0):
+        return "more"
+    ratio = new / base
+    if ratio >= 1.6:
+        return f"{ratio:.1f}\u00d7 more".replace(".0\u00d7", "\u00d7")
+    if ratio > 1:
+        return f"{round((ratio - 1) * 100)}% more"
+    if ratio == 0:
+        return "none"
+    return f"{round((1 - ratio) * 100)}% less"
+
+
+def _assign_verdicts(usable: list["Candidate"]) -> None:
+    """Give each usable candidate a one-line plain-language rationale."""
+    winner = max(usable, key=lambda c: c.value_score)
+    # winner: name what it leads on
+    leads = []
+    if winner.price_usdt == min(c.price_usdt for c in usable if c.price_usdt is not None):
+        leads.append("cheapest")
+    if winner.latency_ms == min(c.latency_ms for c in usable if c.latency_ms is not None):
+        leads.append("fastest")
+    if winner.delivered_chars == max(c.delivered_chars for c in usable if c.delivered_chars is not None):
+        leads.append("most complete")
+    winner.verdict = ("Best balance of price, speed, and delivery"
+                      if not leads else "Best value \u2014 " + ", ".join(leads))
+    # losers: the single sharpest reason they lost to the winner
+    for c in usable:
+        if c is winner:
+            continue
+        bits = []
+        if c.price_usdt and winner.price_usdt and c.price_usdt > winner.price_usdt:
+            bits.append(f"costs {_pct(c.price_usdt, winner.price_usdt)}")
+        if c.latency_ms and winner.latency_ms and c.latency_ms > winner.latency_ms * 1.1:
+            bits.append(f"{_pct(c.latency_ms, winner.latency_ms)} latency")
+        gain = ""
+        if c.delivered_chars and winner.delivered_chars and c.delivered_chars > winner.delivered_chars:
+            gain = f"delivers {_pct(c.delivered_chars, winner.delivered_chars)} data but "
+        if bits:
+            c.verdict = (gain + " and ".join(bits) + " than the winner").capitalize()
+        elif c.price_usdt and winner.price_usdt and c.price_usdt < winner.price_usdt:
+            c.verdict = "Cheaper, but thinner delivery drags its value"
+        else:
+            c.verdict = "Edged out on the price\u2013speed\u2013delivery balance"
 
 
 async def compare_services(
