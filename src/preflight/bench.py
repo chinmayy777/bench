@@ -154,8 +154,16 @@ async def compare_services(
             report_id=report.id, notes=notes,
         )
 
-    candidates = await asyncio.gather(*(probe(u) for u in targets))
-    candidates = list(candidates)
+    # On a real chain, purchases from candidates that settle via the same relayer
+    # wallet must be sequential to avoid nonce collisions. In mock mode there is
+    # no chain nonce, so run concurrently for speed. We can't know each target's
+    # relayer up front, so we gate on the payer's own mode as the signal: a
+    # testnet payer implies real settlement downstream.
+    from .config import settings
+    if settings.payer_mode == "testnet":
+        candidates = [await probe(u) for u in targets]  # sequential: one tx at a time
+    else:
+        candidates = list(await asyncio.gather(*(probe(u) for u in targets)))
     _rank(candidates)
     candidates.sort(key=lambda c: (c.usable, c.value_score), reverse=True)
 
