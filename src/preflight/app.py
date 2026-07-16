@@ -90,7 +90,22 @@ async def compare_services(
 
 mcp_app = mcp.http_app(path="/", stateless_http=True, json_response=True)
 
-app = FastAPI(title="ASP PreFlight", lifespan=mcp_app.lifespan)
+import contextlib
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app):
+    # seed the permanent demo comparison once per boot (idempotent)
+    try:
+        from .demo_seed import ensure_demo_comparison
+        ensure_demo_comparison()
+    except Exception as e:  # never block startup on the seed
+        log.warning("demo seed skipped: %s", e)
+    async with mcp_app.lifespan(app):
+        yield
+
+
+app = FastAPI(title="Bench", lifespan=lifespan)
 app.mount("/mcp", mcp_app)
 app.mount("/static", StaticFiles(directory=_HERE / "static"), name="static")
 
@@ -194,7 +209,7 @@ async def index() -> HTMLResponse:
         "0x2f0ebf349f97b134557172955907438bb0545cc755e9c7d403ec9a4d4f9453df")
     ctx = {
         "listing_url": os.getenv("LISTING_URL", "https://www.okx.ai/"),
-        "sample_compare_url": os.getenv("SAMPLE_COMPARE_URL", ""),
+        "sample_compare_url": os.getenv("SAMPLE_COMPARE_URL", "/compare/demo"),
         "sample_tx_url": f"https://sepolia.basescan.org/tx/{sample_tx}",
         "sample_tx_short": f"{sample_tx[:22]}…{sample_tx[-6:]}",
     }
