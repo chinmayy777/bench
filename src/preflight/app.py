@@ -30,13 +30,14 @@ jinja = Environment(loader=FileSystemLoader(_HERE / "templates"),
                     autoescape=select_autoescape(["html"]))
 
 mcp = FastMCP(
-    "ASP PreFlight",
+    "Tender",
     instructions=(
-        "Commerce-grade preflight checks for paid agent services (A2MCP). "
-        "Point preflight_run at your MCP endpoint before you list it: it probes "
-        "reachability, handshake, schema-vs-claims, x402 paywall correctness, "
-        "price integrity, settled delivery, latency and resilience, then returns "
-        "a scorecard with an evidence permalink."
+        "Value comparison for paid agent services (A2MCP). Give Tender several "
+        "ASP endpoints that do the same job; it makes one real, settled x402 "
+        "purchase from each, measures price, latency, and delivery, and returns "
+        "a ranked scorecard naming the best value — with an on-chain transaction "
+        "as proof for every purchase. Call compare_services with the competing "
+        "endpoints. Let your agent buy the best, not the first."
     ),
 )
 
@@ -105,7 +106,7 @@ async def lifespan(app):
         yield
 
 
-app = FastAPI(title="Bench", lifespan=lifespan)
+app = FastAPI(title="Tender", lifespan=lifespan)
 app.mount("/mcp", mcp_app)
 app.mount("/static", StaticFiles(directory=_HERE / "static"), name="static")
 

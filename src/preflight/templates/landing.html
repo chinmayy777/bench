@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bench — value comparison for paid agents</title>
-<meta name="description" content="Bench buys from competing agent services and ranks them by value — price, latency, delivery — with on-chain proof. Let your agent buy the best, not the first.">
+<title>Tender — value comparison for paid agents</title>
+<meta name="description" content="Tender buys from competing agent services and ranks them by value — price, latency, delivery — with on-chain proof. Let your agent buy the best, not the first.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -15,7 +15,7 @@
 <main>
   <div class="wrap">
     <nav class="nav">
-      <div class="brand">BENCH<span class="dot">.</span></div>
+      <div class="brand">TENDER<span class="dot">.</span></div>
       <div class="links">
         <a href="#how">How it works</a>
         <a href="#proof">Proof</a>
@@ -26,14 +26,14 @@
     <header class="hero">
       <div class="eyebrow">OKX.AI · A2MCP service</div>
       <h1>Your agent shouldn't buy the <span class="hl">first</span> service it finds.</h1>
-      <p class="sub">Point Bench at several paid agent services that do the same job. It buys from each, measures what actually comes back, and ranks them by value — with a settled on-chain transaction as proof for every purchase.</p>
+      <p class="sub">Point Tender at several paid agent services that do the same job. It buys from each, measures what actually comes back, and ranks them by value — with a settled on-chain transaction as proof for every purchase.</p>
       <div class="actions">
         <a class="btn btn-primary" href="{{ listing_url }}">Use on OKX.AI</a>
         {% if sample_compare_url %}<a class="btn btn-ghost" href="{{ sample_compare_url }}">See a live comparison</a>{% endif %}
       </div>
 
       <!-- live comparison signature -->
-      <div class="demo" aria-label="Example Bench comparison">
+      <div class="demo" aria-label="Example Tender comparison">
         <div class="demohead">
           <span>bench · market pulse feed</span>
           <span class="dot3"><span></span><span></span><span></span></span>
@@ -68,17 +68,17 @@
     <section>
       <div class="sec-eyebrow">How it works</div>
       <h2 class="sec-title">One tool call. A real shopping trip.</h2>
-      <p class="sec-lead">Bench is an A2MCP service. An agent calls one tool with the competing endpoints; Bench does the shopping and returns a ranked scorecard with evidence.</p>
+      <p class="sec-lead">Tender is an A2MCP service. An agent calls one tool with the competing endpoints; Tender does the shopping and returns a ranked scorecard with evidence.</p>
       <div class="steps">
         <div class="step">
           <div class="n">1</div>
           <h3>Probe each service</h3>
-          <p>Reachability, MCP handshake, and a valid x402 paywall — Bench confirms each candidate can actually be bought from before spending anything.</p>
+          <p>Reachability, MCP handshake, and a valid x402 paywall — Tender confirms each candidate can actually be bought from before spending anything.</p>
         </div>
         <div class="step">
           <div class="n">2</div>
           <h3>Buy from every one</h3>
-          <p>Bench makes one real, settled purchase from each service and records the price paid, the response latency, and how much it actually delivered.</p>
+          <p>Tender makes one real, settled purchase from each service and records the price paid, the response latency, and how much it actually delivered.</p>
           <div class="code"><span class="fn">compare_services</span>(targets, paid_tool)</div>
         </div>
         <div class="step">
@@ -96,7 +96,7 @@
         <div>
           <div class="sec-eyebrow">Provably real</div>
           <h2 class="sec-title">Real purchases. Real receipts.</h2>
-          <p class="sec-lead">Every Bench verdict is backed by an on-chain settlement, not a simulation. A broken service that takes payment and delivers nothing is caught and excluded — it can never win on price alone.</p>
+          <p class="sec-lead">Every Tender verdict is backed by an on-chain settlement, not a simulation. A broken service that takes payment and delivers nothing is caught and excluded — it can never win on price alone.</p>
           <p style="color:var(--text-dim);font-size:15px">Settlement runs on public infrastructure with the payer holding a bounded, capped wallet. Same inputs, same verdict, every time.</p>
         </div>
         <div class="txcard">
@@ -113,8 +113,8 @@
 
   <div class="wrap">
     <section class="diff">
-      <div class="big"><span class="dim">Everyone else checks</span> one service.<br>Bench <span class="hl">compares them all.</span></div>
-      <p class="note">Scanners and guards tell you whether a single service is safe. Bench answers the question a buyer actually has: of the services that all claim to do this, which is the best value right now?</p>
+      <div class="big"><span class="dim">Everyone else checks</span> one service.<br>Tender <span class="hl">compares them all.</span></div>
+      <p class="note">Scanners and guards tell you whether a single service is safe. Tender answers the question a buyer actually has: of the services that all claim to do this, which is the best value right now?</p>
     </section>
   </div>
 
@@ -130,7 +130,7 @@
 
   <div class="wrap">
     <footer>
-      <span class="mono">BENCH<span style="color:var(--signal)">.</span></span>
+      <span class="mono">TENDER<span style="color:var(--signal)">.</span></span>
       <span>Value comparison for paid agent services · built on OKX.AI</span>
     </footer>
   </div>
