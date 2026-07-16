@@ -156,6 +156,29 @@ async def demo_run(target_url: str, paid_tool: str = "market_pulse",
         f'<p><a href="{link}">{link}</a></p>'
     )
 
+@app.get("/api/demo-compare", response_class=HTMLResponse)
+async def demo_compare(targets: str, paid_tool: str = "market_pulse",
+                       task: str = "market pulse feed") -> HTMLResponse:
+    """Browser-triggerable comparison (GET). Enabled only when DEMO_TRIGGER=1."""
+    import os
+    if os.getenv("DEMO_TRIGGER", "0").lower() not in {"1", "true", "yes"}:
+        raise HTTPException(404, "not found")
+    url_list = [u.strip() for u in targets.split(",") if u.strip()]
+    from .bench import compare_services as _compare
+    try:
+        comp = await _compare(url_list, paid_tool=paid_tool, task=task)
+    except (ValueError, TargetRejected) as e:
+        raise HTTPException(400, str(e))
+    link = f"{settings.base_url}/compare/{comp.id}"
+    rows = "".join(
+        f"<li>{c.target_url} — score {c.value_score if c.usable else '—'} "
+        f"· {c.price_usdt} USDC · {c.latency_ms}ms · tx {c.tx_ref or '—'}</li>"
+        for c in comp.candidates)
+    return HTMLResponse(
+        f'<p>Comparison complete. Best value: <b>{comp.winner_url or "none"}</b></p>'
+        f'<p>Total spend: {comp.total_spend_usdt} USDC</p><ul>{rows}</ul>'
+        f'<p><a href="{link}">{link}</a></p>'
+    )
 
 @app.get("/")
 async def index() -> RedirectResponse:
