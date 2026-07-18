@@ -68,6 +68,10 @@ class PaywallASGI:
         self.resource = resource
 
     async def __call__(self, scope, receive, send):
+        if (scope["type"] == "http" and scope["method"] == "GET"
+                and scope.get("path", "").rstrip("/") == "/healthz"):
+            return await self._json(send, 200, {"ok": True})
+
         if (scope["type"] != "http" or scope["method"] != "POST"
                 or scope.get("path", "").rstrip("/") != "/mcp"):
             return await self.app(scope, receive, send)

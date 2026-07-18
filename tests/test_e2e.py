@@ -1,6 +1,7 @@
 """End-to-end: run the real suite over HTTP against live BrokenBazaar instances."""
 import asyncio
 
+import httpx
 import pytest
 
 from fixtures.broken_bazaar.app import create_app
@@ -69,3 +70,10 @@ def test_report_page_renders(server_factory):
     assert "PASS" in page.text and "C6" in page.text
     assert client.get("/report/doesnotexist").status_code == 404
     assert client.get("/healthz").json()["ok"] is True
+
+
+def test_bazaar_healthz(server_factory):
+    with server_factory(create_app(), 8906):
+        resp = httpx.get("http://127.0.0.1:8906/healthz")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}

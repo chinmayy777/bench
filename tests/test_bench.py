@@ -1,6 +1,8 @@
 """Bench comparison engine end-to-end tests."""
 import asyncio
 
+import httpx
+
 from fixtures.broken_bazaar.vendor_sim import create_app as vendor
 from preflight.bench import compare_services
 from preflight.store import load_comparison
@@ -53,3 +55,10 @@ def test_compare_requires_two_targets():
     import pytest
     with pytest.raises(ValueError):
         asyncio.run(compare_services(["http://127.0.0.1:9/mcp/"]))
+
+
+def test_vendor_sim_healthz(server_factory):
+    with server_factory(vendor(price=0.05, latency_ms=0, richness=0), 8858):
+        resp = httpx.get("http://127.0.0.1:8858/healthz")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
