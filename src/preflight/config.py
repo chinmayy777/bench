@@ -18,6 +18,8 @@ class Settings:
     max_pay_per_call_usdt: float = float(os.getenv("MAX_PAY_PER_CALL_USDT", "2"))
     max_pay_per_day_usdt: float = float(os.getenv("MAX_PAY_PER_DAY_USDT", "10"))
     run_budget_s: float = float(os.getenv("RUN_BUDGET_S", "75"))
+    wake_enabled: bool = _flag("WAKE_ENABLED", "1")
+    wake_timeout_s: float = float(os.getenv("WAKE_TIMEOUT_S", "75"))
     # Networks we will ever sign payments on. Mainnets are NOT listable here by design.
     allowed_pay_networks: tuple = field(
         default=("base-sepolia", "eip155:84532", "mock"), init=False

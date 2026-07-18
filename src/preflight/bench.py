@@ -19,6 +19,7 @@ from .payer import Payer
 from .runner import run_preflight
 from .ssrf import TargetRejected
 from .store import new_report_id, save_comparison
+from .wake import WakeResult, wake_targets
 
 log = logging.getLogger("bench")
 
@@ -43,6 +44,8 @@ class Candidate:
     notes: list[str] = field(default_factory=list)
     value_score: float = 0.0  # 0..100, filled by ranking
     verdict: str = ""  # plain-language reason, filled by ranking
+    wake_ms: int | None = None  # time to first /healthz response, from the wake phase
+    woke: bool = False  # True if wake_ms implied a cold start (> 2000ms)
 
     @property
     def usable(self) -> bool:
@@ -195,11 +198,13 @@ async def compare_services(
     task: str = "",
     payer: Payer | None = None,
 ) -> Comparison:
-    """Probe + buy from each target concurrently, then rank by value."""
+    """Wake, then probe + buy from each target concurrently, then rank by value."""
     if not targets or len(targets) < 2:
         raise ValueError("compare needs at least 2 target URLs")
     if len(targets) > 5:
         raise ValueError("compare supports at most 5 targets per run")
+
+    from .config import settings
 
     payer = payer or Payer()
     claims = {k: v for k, v in {
@@ -207,12 +212,36 @@ async def compare_services(
         "sample_args": sample_args or {},
     }.items() if v is not None}
 
+    # Wake phase: hit each target's /healthz in parallel first, so a cold-started
+    # host's slow first response doesn't get counted as paid latency and doesn't
+    # sink the whole comparison. Never-woke targets are excluded from the probe/
+    # purchase phase below, same as any other unreachable candidate.
+    wake_results: dict[str, WakeResult] = {}
+    if settings.wake_enabled:
+        wake_results = await wake_targets(targets, settings.wake_timeout_s)
+
+    def _wake_fields(url: str) -> tuple[int | None, bool]:
+        wr = wake_results.get(url)
+        return (wr.wake_ms, wr.woke) if wr else (None, False)
+
+    candidates: list[Candidate] = []
+    awake_targets: list[str] = []
+    for url in targets:
+        wr = wake_results.get(url)
+        if wr is not None and not wr.woke_ok:
+            candidates.append(Candidate(url, False, False, None, None, None, None,
+                                        report_id="", notes=[wr.reason]))
+        else:
+            awake_targets.append(url)
+
     async def probe(url: str) -> Candidate:
+        wake_ms, woke = _wake_fields(url)
         try:
             report = await run_preflight(url, dict(claims), payer=payer)
         except TargetRejected as e:
             return Candidate(url, False, False, None, None, None, None,
-                             report_id="", notes=[f"rejected: {e}"])
+                             report_id="", notes=[f"rejected: {e}"],
+                             wake_ms=wake_ms, woke=woke)
         m = _extract(report)
         notes = []
         if not m["reachable"]:
@@ -225,7 +254,7 @@ async def compare_services(
             target_url=url, reachable=m["reachable"], purchased=m["purchased"],
             price_usdt=m["price"], latency_ms=m["latency"],
             delivered_chars=m["delivered"], tx_ref=(report.tx_refs[0] if report.tx_refs else None),
-            report_id=report.id, notes=notes,
+            report_id=report.id, notes=notes, wake_ms=wake_ms, woke=woke,
         )
 
     # On a real chain, purchases from candidates that settle via the same relayer
@@ -233,11 +262,11 @@ async def compare_services(
     # no chain nonce, so run concurrently for speed. We can't know each target's
     # relayer up front, so we gate on the payer's own mode as the signal: a
     # testnet payer implies real settlement downstream.
-    from .config import settings
-    if settings.payer_mode == "testnet":
-        candidates = [await probe(u) for u in targets]  # sequential: one tx at a time
-    else:
-        candidates = list(await asyncio.gather(*(probe(u) for u in targets)))
+    if awake_targets:
+        if settings.payer_mode == "testnet":
+            candidates.extend([await probe(u) for u in awake_targets])  # sequential: one tx at a time
+        else:
+            candidates.extend(await asyncio.gather(*(probe(u) for u in awake_targets)))
     _rank(candidates)
     candidates.sort(key=lambda c: (c.usable, c.value_score), reverse=True)
 
