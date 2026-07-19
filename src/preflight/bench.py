@@ -86,8 +86,13 @@ def _extract(report: Report) -> dict[str, Any]:
         delivered = int(c7.evidence["delivered_chars"])
     purchased = by_id.get("C6", None) is not None and by_id["C6"].status == Status.PASS
     reachable = by_id.get("C1", None) is not None and by_id["C1"].status == Status.PASS
+    # the real reason C6 didn't PASS (facilitator rejection, crash, skip, ...) —
+    # surfaced verbatim so bench doesn't collapse it into a generic note
+    purchase_error = None
+    if not purchased and (c6 := by_id.get("C6")) is not None:
+        purchase_error = c6.summary
     return {"price": price, "latency": latency, "delivered": delivered,
-            "purchased": purchased, "reachable": reachable}
+            "purchased": purchased, "reachable": reachable, "purchase_error": purchase_error}
 
 
 def _rank(candidates: list[Candidate]) -> None:
@@ -247,7 +252,7 @@ async def compare_services(
         if not m["reachable"]:
             notes.append("unreachable")
         if not m["purchased"]:
-            notes.append("purchase failed or skipped")
+            notes.append(m["purchase_error"] or "purchase failed or skipped")
         if m["delivered"] is not None and m["delivered"] == 0:
             notes.append("paid but empty")
         return Candidate(

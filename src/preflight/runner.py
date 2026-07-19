@@ -37,7 +37,9 @@ async def run_preflight(target_url: str, claims: dict[str, Any] | None = None,
                 res = CheckResult(check.CHECK_ID, check.CHECK_NAME, Status.FAIL,
                                   f"timed out after {budget:.0f}s",
                                   {"timeout": True, "budget_s": budget})
-            log.info("check=%s status=%s ms=%s", res.id, res.status.value, res.duration_ms)
+            log_fn = log.warning if res.status == Status.FAIL else log.info
+            log_fn("check=%s status=%s ms=%s summary=%s", res.id, res.status.value,
+                   res.duration_ms, res.summary)
             results.append(res)
 
     failed_gating = [r.id for r in results if r.status == Status.FAIL and r.id in GATING]

@@ -48,7 +48,8 @@ def timed(fn):
             res: CheckResult = await fn(ctx)
         except Exception as e:  # a check must yield a result, never explode
             res = CheckResult(fn.CHECK_ID, fn.CHECK_NAME, Status.FAIL,
-                              f"check crashed: {type(e).__name__}: {e}")
+                              f"check crashed: {type(e).__name__}: {e}",
+                              {"error": f"{type(e).__name__}: {e}"})
         res.duration_ms = int((time.perf_counter() - t0) * 1000)
         return res
     wrapper.CHECK_ID, wrapper.CHECK_NAME = fn.CHECK_ID, fn.CHECK_NAME
