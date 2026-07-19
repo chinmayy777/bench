@@ -70,10 +70,16 @@ def test_report_page_renders(server_factory):
     assert "PASS" in page.text and "C6" in page.text
     assert client.get("/report/doesnotexist").status_code == 404
     assert client.get("/healthz").json()["ok"] is True
+    head = client.head("/healthz")
+    assert head.status_code == 200
+    assert head.content == b""
 
 
 def test_bazaar_healthz(server_factory):
     with server_factory(create_app(), 8906):
         resp = httpx.get("http://127.0.0.1:8906/healthz")
+        head = httpx.head("http://127.0.0.1:8906/healthz")
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
+    assert head.status_code == 200
+    assert head.content == b""

@@ -111,9 +111,12 @@ app.mount("/mcp", mcp_app)
 app.mount("/static", StaticFiles(directory=_HERE / "static"), name="static")
 
 
-@app.get("/healthz")
-async def healthz() -> JSONResponse:
-    return JSONResponse({"ok": True, "payer_mode": settings.payer_mode})
+@app.api_route("/healthz", methods=["GET", "HEAD"])
+async def healthz(request: Request) -> JSONResponse:
+    resp = JSONResponse({"ok": True, "payer_mode": settings.payer_mode})
+    if request.method == "HEAD":
+        resp.body = b""  # same status/headers as GET, no body, per HTTP spec
+    return resp
 
 
 @app.post("/api/run")

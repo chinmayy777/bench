@@ -60,5 +60,8 @@ def test_compare_requires_two_targets():
 def test_vendor_sim_healthz(server_factory):
     with server_factory(vendor(price=0.05, latency_ms=0, richness=0), 8858):
         resp = httpx.get("http://127.0.0.1:8858/healthz")
+        head = httpx.head("http://127.0.0.1:8858/healthz")
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
+    assert head.status_code == 200
+    assert head.content == b""

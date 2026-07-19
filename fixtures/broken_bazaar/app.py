@@ -68,9 +68,10 @@ class PaywallASGI:
         self.resource = resource
 
     async def __call__(self, scope, receive, send):
-        if (scope["type"] == "http" and scope["method"] == "GET"
+        if (scope["type"] == "http" and scope["method"] in ("GET", "HEAD")
                 and scope.get("path", "").rstrip("/") == "/healthz"):
-            return await self._json(send, 200, {"ok": True})
+            return await self._json(send, 200, {"ok": True},
+                                    include_body=scope["method"] != "HEAD")
 
         if (scope["type"] != "http" or scope["method"] != "POST"
                 or scope.get("path", "").rstrip("/") != "/mcp"):
@@ -120,12 +121,14 @@ class PaywallASGI:
         return await self.app(scope, replay, send)
 
     @staticmethod
-    async def _json(send, status: int, payload: dict):
+    async def _json(send, status: int, payload: dict, include_body: bool = True):
         body = json.dumps(payload).encode()
         await send({"type": "http.response.start", "status": status,
                     "headers": [(b"content-type", b"application/json"),
                                 (b"content-length", str(len(body)).encode())]})
-        await send({"type": "http.response.body", "body": body})
+        # HEAD: same status/headers (content-length reflects the would-be
+        # body, per HTTP spec) but no body on the wire.
+        await send({"type": "http.response.body", "body": body if include_body else b""})
 
 
 def create_app(*, bug_price: bool = False, bug_empty: bool = False,
