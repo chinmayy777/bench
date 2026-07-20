@@ -1,4 +1,11 @@
-"""SQLite persistence: one reports table plus a payments intent ledger."""
+"""Persistence: one reports table plus a payments intent ledger.
+
+Backend is local sqlite3 by default (unchanged from before). When both
+TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are set, storage instead goes through
+Turso (libSQL) — an embedded replica that syncs with the remote database on
+every connection — so comparisons/reports survive container restarts on
+ephemeral hosts. Either var absent falls back to the local sqlite file.
+"""
 from __future__ import annotations
 
 import json
@@ -6,7 +13,6 @@ import secrets
 import sqlite3
 from contextlib import contextmanager
 
-from .config import settings
 from .models import CheckResult, Report, Status
 
 _SCHEMA = """
@@ -20,16 +26,45 @@ CREATE TABLE IF NOT EXISTS payments (
 """
 
 
+def _using_turso() -> bool:
+    # Fresh lookup each call (not a module-level import) so tests can
+    # monkeypatch `preflight.config.settings` and have it take effect here,
+    # the same convention `bench.py` uses for its own settings reads.
+    from .config import settings
+    return bool(settings.turso_database_url and settings.turso_auth_token)
+
+
 @contextmanager
 def _conn():
-    con = sqlite3.connect(settings.db_path)
-    con.row_factory = sqlite3.Row
+    from .config import settings
+    turso = bool(settings.turso_database_url and settings.turso_auth_token)
+    if turso:
+        import libsql
+        con = libsql.connect(":memory:", sync_url=settings.turso_database_url,
+                             auth_token=settings.turso_auth_token)
+        con.sync()  # pull current remote state into this fresh replica
+    else:
+        con = sqlite3.connect(settings.db_path)
     try:
         con.executescript(_SCHEMA)
         yield con
         con.commit()
+        if turso:
+            con.sync()  # push writes back to the remote database
     finally:
         con.close()
+
+
+def _row_dict(cursor, row) -> dict | None:
+    """Normalize one fetched row to a plain dict regardless of backend.
+
+    sqlite3 returns raw tuples by default (same as libSQL) — both are zipped
+    against `cursor.description` here so every call site gets uniform,
+    key-addressable rows without caring which backend answered."""
+    if row is None:
+        return None
+    cols = [d[0] for d in cursor.description]
+    return dict(zip(cols, row))
 
 
 def new_report_id() -> str:
@@ -47,7 +82,8 @@ def save_report(r: Report) -> None:
 
 def load_report(report_id: str) -> Report | None:
     with _conn() as con:
-        row = con.execute("SELECT * FROM reports WHERE id=?", (report_id,)).fetchone()
+        cur = con.execute("SELECT * FROM reports WHERE id=?", (report_id,))
+        row = _row_dict(cur, cur.fetchone())
     if row is None:
         return None
     results = [
@@ -66,7 +102,7 @@ _COMPARISONS_SCHEMA = (
     "candidates_json TEXT, winner_url TEXT, total_spend_usdt REAL, tx_refs_json TEXT)")
 
 # Columns added after the initial release — applied to any pre-existing table
-# on every connection so an older on-disk db picks them up without a migration step.
+# on every connection so an older db picks them up without a migration step.
 _COMPARISONS_NEW_COLUMNS = (
     ("paid_tool", "TEXT"),
     ("paid_tool_inferred", "INTEGER"),
@@ -80,8 +116,10 @@ def _ensure_comparisons_table(con) -> None:
     for name, coltype in _COMPARISONS_NEW_COLUMNS:
         try:
             con.execute(f"ALTER TABLE comparisons ADD COLUMN {name} {coltype}")
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        except (sqlite3.OperationalError, ValueError):
+            # column already exists — sqlite3 raises OperationalError,
+            # libsql raises ValueError for the same condition
+            pass
 
 
 def save_comparison(comp) -> None:
@@ -107,7 +145,8 @@ def load_comparison(comp_id: str):
     from .bench import Candidate, Comparison
     with _conn() as con:
         _ensure_comparisons_table(con)
-        row = con.execute("SELECT * FROM comparisons WHERE id=?", (comp_id,)).fetchone()
+        cur = con.execute("SELECT * FROM comparisons WHERE id=?", (comp_id,))
+        row = _row_dict(cur, cur.fetchone())
     if row is None:
         return None
     import dataclasses

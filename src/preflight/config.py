@@ -11,6 +11,11 @@ def _flag(name: str, default: str = "0") -> bool:
 class Settings:
     base_url: str = os.getenv("BASE_URL", "http://127.0.0.1:8000").rstrip("/")
     db_path: str = os.getenv("DB_PATH", "preflight.db")
+    # When both are set, store.py persists comparisons/reports to Turso
+    # (libSQL) instead of the local sqlite file, so data survives container
+    # restarts. Either absent -> falls back to db_path above, unchanged.
+    turso_database_url: str = os.getenv("TURSO_DATABASE_URL", "")
+    turso_auth_token: str = os.getenv("TURSO_AUTH_TOKEN", "")
     payer_mode: str = os.getenv("PAYER_MODE", "mock")  # off | mock | testnet
     payer_private_key: str = os.getenv("PAYER_PRIVATE_KEY", "")
     allow_local_targets: bool = _flag("ALLOW_LOCAL_TARGETS")
