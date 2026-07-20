@@ -60,30 +60,53 @@ def load_report(report_id: str) -> Report | None:
                   row["spend_usdt"], json.loads(row["tx_refs_json"]))
 
 
+_COMPARISONS_SCHEMA = (
+    "CREATE TABLE IF NOT EXISTS comparisons ("
+    "id TEXT PRIMARY KEY, created_at TEXT, task TEXT, "
+    "candidates_json TEXT, winner_url TEXT, total_spend_usdt REAL, tx_refs_json TEXT)")
+
+# Columns added after the initial release — applied to any pre-existing table
+# on every connection so an older on-disk db picks them up without a migration step.
+_COMPARISONS_NEW_COLUMNS = (
+    ("paid_tool", "TEXT"),
+    ("paid_tool_inferred", "INTEGER"),
+    ("no_paid_tool", "INTEGER"),
+    ("target_tools_json", "TEXT"),
+)
+
+
+def _ensure_comparisons_table(con) -> None:
+    con.execute(_COMPARISONS_SCHEMA)
+    for name, coltype in _COMPARISONS_NEW_COLUMNS:
+        try:
+            con.execute(f"ALTER TABLE comparisons ADD COLUMN {name} {coltype}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
+
 def save_comparison(comp) -> None:
     """Persist a Bench comparison. Candidates stored as JSON blob."""
     import json as _json
     from dataclasses import asdict
     with _conn() as con:
+        _ensure_comparisons_table(con)
         con.execute(
-            "CREATE TABLE IF NOT EXISTS comparisons ("
-            "id TEXT PRIMARY KEY, created_at TEXT, task TEXT, "
-            "candidates_json TEXT, winner_url TEXT, total_spend_usdt REAL, tx_refs_json TEXT)")
-        con.execute(
-            "INSERT OR REPLACE INTO comparisons VALUES (?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO comparisons "
+            "(id, created_at, task, candidates_json, winner_url, total_spend_usdt, "
+            "tx_refs_json, paid_tool, paid_tool_inferred, no_paid_tool, target_tools_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (comp.id, comp.created_at, comp.task,
              _json.dumps([asdict(c) for c in comp.candidates]),
-             comp.winner_url, comp.total_spend_usdt, _json.dumps(comp.tx_refs)))
+             comp.winner_url, comp.total_spend_usdt, _json.dumps(comp.tx_refs),
+             comp.paid_tool, int(comp.paid_tool_inferred), int(comp.no_paid_tool),
+             _json.dumps(comp.target_tools)))
 
 
 def load_comparison(comp_id: str):
     import json as _json
     from .bench import Candidate, Comparison
     with _conn() as con:
-        con.execute(
-            "CREATE TABLE IF NOT EXISTS comparisons ("
-            "id TEXT PRIMARY KEY, created_at TEXT, task TEXT, "
-            "candidates_json TEXT, winner_url TEXT, total_spend_usdt REAL, tx_refs_json TEXT)")
+        _ensure_comparisons_table(con)
         row = con.execute("SELECT * FROM comparisons WHERE id=?", (comp_id,)).fetchone()
     if row is None:
         return None
@@ -91,6 +114,12 @@ def load_comparison(comp_id: str):
     _fields = {f.name for f in dataclasses.fields(Candidate)}
     cands = [Candidate(**{k: v for k, v in d.items() if k in _fields})
              for d in _json.loads(row["candidates_json"])]
-    return Comparison(row["id"], row["created_at"], row["task"], cands,
-                      row["winner_url"], row["total_spend_usdt"],
-                      _json.loads(row["tx_refs_json"]))
+    keys = row.keys()
+    return Comparison(
+        row["id"], row["created_at"], row["task"], cands,
+        row["winner_url"], row["total_spend_usdt"], _json.loads(row["tx_refs_json"]),
+        paid_tool=row["paid_tool"] if "paid_tool" in keys else None,
+        paid_tool_inferred=bool(row["paid_tool_inferred"]) if "paid_tool_inferred" in keys and row["paid_tool_inferred"] is not None else False,
+        no_paid_tool=bool(row["no_paid_tool"]) if "no_paid_tool" in keys and row["no_paid_tool"] is not None else False,
+        target_tools=_json.loads(row["target_tools_json"]) if "target_tools_json" in keys and row["target_tools_json"] is not None else {},
+    )

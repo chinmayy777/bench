@@ -29,6 +29,10 @@ W_PRICE = 0.45
 W_LATENCY = 0.25
 W_DELIVERY = 0.30
 
+# Tool names that are never the thing being compared, even if every target
+# happens to expose one — excluded before computing the common-tool intersection.
+_UTILITY_TOOLS = {"ping", "health", "healthz", "status"}
+
 
 @dataclass
 class Candidate:
@@ -61,6 +65,14 @@ class Comparison:
     winner_url: str | None
     total_spend_usdt: float
     tx_refs: list[str]
+    paid_tool: str | None = None
+    paid_tool_inferred: bool = False
+    # True when paid_tool was omitted and no single common tool could be inferred —
+    # no probing/ranking was attempted, so `candidates` only holds wake-dead targets.
+    no_paid_tool: bool = False
+    # url -> sorted tool names (excluding utilities), or None if listing failed.
+    # Only populated when paid_tool inference was attempted.
+    target_tools: dict[str, list[str] | None] = field(default_factory=dict)
 
 
 def _extract(report: Report) -> dict[str, Any]:
@@ -195,6 +207,17 @@ def _assign_verdicts(usable: list["Candidate"]) -> None:
             c.verdict = "Edged out on the overall balance"
 
 
+async def _list_target_tools(url: str) -> list[str] | None:
+    """Best-effort MCP tool listing, used only to infer a paid tool. None on any failure."""
+    from fastmcp import Client
+    try:
+        async with Client(url, timeout=8.0) as client:
+            tools = await client.list_tools()
+        return sorted(t.name for t in tools)
+    except Exception:
+        return None
+
+
 async def compare_services(
     targets: list[str],
     paid_tool: str | None = None,
@@ -212,10 +235,6 @@ async def compare_services(
     from .config import settings
 
     payer = payer or Payer()
-    claims = {k: v for k, v in {
-        "paid_tool": paid_tool, "price_usdt": price_usdt,
-        "sample_args": sample_args or {},
-    }.items() if v is not None}
 
     # Wake phase: hit each target's /healthz in parallel first, so a cold-started
     # host's slow first response doesn't get counted as paid latency and doesn't
@@ -231,6 +250,7 @@ async def compare_services(
 
     candidates: list[Candidate] = []
     awake_targets: list[str] = []
+    target_tools: dict[str, list[str] | None] = {url: None for url in targets}
     for url in targets:
         wr = wake_results.get(url)
         if wr is not None and not wr.woke_ok:
@@ -238,6 +258,46 @@ async def compare_services(
                                         report_id="", notes=[wr.reason]))
         else:
             awake_targets.append(url)
+
+    # Infer paid_tool when the caller didn't name one: list each awake target's
+    # tools, exclude non-purchasable utilities, and intersect. Only an exact,
+    # unambiguous single match is used — anything else stops before any probing
+    # or purchase is attempted, so a missing/ambiguous paid_tool never gets
+    # reported as "no usable service" (that message is reserved for targets that
+    # were genuinely probed and failed).
+    inferred = False
+    no_paid_tool = False
+    effective_paid_tool = paid_tool
+
+    if not effective_paid_tool:
+        listed = await asyncio.gather(*(_list_target_tools(u) for u in awake_targets))
+        for url, names in zip(awake_targets, listed):
+            target_tools[url] = names
+        pools = [
+            {n for n in names if n.lower() not in _UTILITY_TOOLS}
+            for names in target_tools.values() if names is not None
+        ]
+        common = set.intersection(*pools) if pools else set()
+        if len(common) == 1:
+            effective_paid_tool = next(iter(common))
+            inferred = True
+        else:
+            no_paid_tool = True
+
+    if no_paid_tool:
+        comp = Comparison(
+            id=new_report_id(), created_at=now_iso(), task=task or "comparison",
+            candidates=candidates, winner_url=None, total_spend_usdt=0.0, tx_refs=[],
+            paid_tool=None, paid_tool_inferred=False, no_paid_tool=True,
+            target_tools=target_tools,
+        )
+        save_comparison(comp)
+        return comp
+
+    claims = {k: v for k, v in {
+        "paid_tool": effective_paid_tool, "price_usdt": price_usdt,
+        "sample_args": sample_args or {},
+    }.items() if v is not None}
 
     async def probe(url: str) -> Candidate:
         wake_ms, woke = _wake_fields(url)
@@ -280,9 +340,12 @@ async def compare_services(
     tx_refs = [c.tx_ref for c in candidates if c.tx_ref]
 
     comp = Comparison(
-        id=new_report_id(), created_at=now_iso(), task=task or (paid_tool or "comparison"),
+        id=new_report_id(), created_at=now_iso(),
+        task=task or (effective_paid_tool or "comparison"),
         candidates=candidates, winner_url=winner,
         total_spend_usdt=total_spend, tx_refs=tx_refs,
+        paid_tool=effective_paid_tool, paid_tool_inferred=inferred, no_paid_tool=False,
+        target_tools=target_tools,
     )
     save_comparison(comp)
     return comp
@@ -290,19 +353,44 @@ async def compare_services(
 
 def comparison_markdown(comp: Comparison, base_url: str) -> str:
     lines = [f"# Bench comparison — {comp.task}", ""]
+
+    if comp.no_paid_tool:
+        lines.append("**No paid tool was named, and none could be inferred.**\n")
+        lines.append(
+            "Pass `paid_tool` explicitly, or make sure every target exposes exactly one "
+            "common purchasable tool beyond basic utilities (ping/health/healthz/status).\n"
+        )
+        lines.append("| Service | Tools exposed |")
+        lines.append("|---|---|")
+        dead_notes = {c.target_url: ", ".join(c.notes) for c in comp.candidates if c.notes}
+        for url, tools in comp.target_tools.items():
+            if tools is not None:
+                shown = ", ".join(tools) if tools else "(no tools)"
+            else:
+                shown = dead_notes.get(url, "could not list tools")
+            lines.append(f"| {url} | {shown} |")
+        lines.append(f"\nFull comparison: {base_url}/compare/{comp.id}")
+        return "\n".join(lines)
+
     if comp.winner_url:
         lines.append(f"**Best value: {comp.winner_url}**\n")
     else:
         lines.append("**No usable service among the candidates.**\n")
-    lines.append("| Service | Score | Price | Latency | Delivered | Status |")
-    lines.append("|---|---|---|---|---|---|")
+    if comp.paid_tool_inferred:
+        lines.append(
+            f"_Paid tool not supplied — inferred as `{comp.paid_tool}`, "
+            "the one tool common to every target._\n"
+        )
+    lines.append("| Service | Score | Price | Latency | Delivered | Wake | Status |")
+    lines.append("|---|---|---|---|---|---|---|")
     for c in comp.candidates:
         price = f"{c.price_usdt}" if c.price_usdt is not None else "—"
         lat = f"{c.latency_ms}ms" if c.latency_ms is not None else "—"
         deliv = f"{c.delivered_chars}c" if c.delivered_chars is not None else "—"
+        wake = "—" if c.wake_ms is None else f"{c.wake_ms}ms" + (" (cold)" if c.woke else "")
         status = "✅ usable" if c.usable else ("⚠️ " + ", ".join(c.notes) if c.notes else "—")
         score = f"{c.value_score}" if c.usable else "—"
-        lines.append(f"| {c.target_url} | {score} | {price} | {lat} | {deliv} | {status} |")
+        lines.append(f"| {c.target_url} | {score} | {price} | {lat} | {deliv} | {wake} | {status} |")
     if comp.total_spend_usdt:
         lines.append(f"\nTotal test spend: {comp.total_spend_usdt} (non-mainnet)")
     lines.append(f"\nFull comparison: {base_url}/compare/{comp.id}")

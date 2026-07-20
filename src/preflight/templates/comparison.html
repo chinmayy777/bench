@@ -26,7 +26,12 @@
     <div class="cell"><div class="k">Run</div><div class="v" style="font-size:12px">{{ c.id }}</div></div>
   </div>
 
-  {% if c.winner_url %}
+  {% if c.no_paid_tool %}
+  <div class="verdict none">
+    <span class="lbl">Result</span>
+    <span class="who">No paid tool named, and none could be inferred</span>
+  </div>
+  {% elif c.winner_url %}
   <div class="verdict">
     <span class="lbl">Best value</span>
     <span class="who">{{ c.winner_url }}</span>
@@ -37,6 +42,28 @@
     <span class="who">No usable service among candidates</span>
   </div>
   {% endif %}
+
+  {% if c.paid_tool_inferred %}
+  <div class="inferred-note">Paid tool not supplied — inferred as <code>{{ c.paid_tool }}</code>, the one tool common to every target.</div>
+  {% endif %}
+
+  {% if c.no_paid_tool %}
+  <div class="toolboard">
+    <p class="toolhint">Pass <code>paid_tool</code> explicitly, or make sure every target exposes exactly one common purchasable tool beyond basic utilities (ping/health/healthz/status).</p>
+    {% for url, tools in c.target_tools.items() %}
+    <div class="toolrow">
+      <div class="toolsvc">{{ url }}</div>
+      <div class="toollist">
+        {% if tools is not none %}
+          {% if tools %}{% for t in tools %}<span class="toolchip">{{ t }}</span>{% endfor %}{% else %}<span class="toolnote">(no tools)</span>{% endif %}
+        {% else %}
+          <span class="toolnote">could not list tools</span>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
 
   {# precompute maxima for bar scaling #}
   {% set prices = c.candidates | selectattr('usable') | map(attribute='price_usdt') | select('!=', None) | list %}
@@ -53,6 +80,9 @@
 
       <div class="svc">
         <div class="name">{{ cand.target_url }}</div>
+        {% if cand.wake_ms is not none %}
+        <div class="wake">woke in {{ cand.wake_ms }}ms{% if cand.woke %} <span class="coldtag">cold start — excluded from latency</span>{% endif %}</div>
+        {% endif %}
         {% if cand.usable %}
         <div class="bars">
           <div class="bar {{ 'good' if cand.price_usdt == prices|min }}">
@@ -93,6 +123,7 @@
     </div>
     {% endfor %}
   </div>
+  {% endif %}
 
   <div class="foot">
     <span class="weights">value = price <b>45%</b> · latency <b>25%</b> · delivery <b>30%</b></span>

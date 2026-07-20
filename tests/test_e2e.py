@@ -49,13 +49,17 @@ def test_empty_delivery_bug_caught(server_factory):
     assert report.overall == "FAIL"
 
 
-def test_missing_paywall_caught(server_factory):
-    """A 'paid' tool that never returns 402 = broken paywall (C4 fail)."""
+def test_naked_tool_reported_as_free_not_broken(server_factory):
+    """A 'paid' tool that answers directly with 200 (no 402 at all) reads as a
+    free service, not a broken paywall — C4 is a WARN, not a FAIL, and the run
+    isn't gated on it."""
     naked = create_app().inner_app  # bypass the paywall wrapper entirely
     with server_factory(naked, 8904):
         report = _run("http://127.0.0.1:8904/mcp/")
-    assert _status(report, "C4") == Status.FAIL
-    assert report.overall == "FAIL"
+    assert _status(report, "C4") == Status.WARN
+    c4 = {r.id: r for r in report.results}["C4"]
+    assert "this service appears to be free — no payment required" in c4.summary
+    assert report.overall == "PASS"
 
 
 def test_report_page_renders(server_factory):

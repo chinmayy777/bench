@@ -65,37 +65,62 @@ async def _c3(ctx: RunContext) -> CheckResult:
 
 
 async def _c4(ctx: RunContext) -> CheckResult:
+    def _done(status: Status, summary: str, ev: dict | None = None) -> CheckResult:
+        res = CheckResult("C4", _c4.CHECK_NAME, status, summary, ev or {})
+        ctx.state["c4_result"] = res
+        return res
+
     if not ctx.paid_tool:
-        return CheckResult("C4", _c4.CHECK_NAME, Status.SKIP,
-                           "no paid tool declared — nothing to paywall-check")
+        return _done(Status.SKIP,
+                     "no paid tool named and none could be inferred — nothing to paywall-check")
+
     resp = await call_tool_raw(ctx, ctx.paid_tool, ctx.claims.get("sample_args", {}))
     ev = {"status_code": resp.status_code, "body_excerpt": excerpt(resp.text)}
+
+    # case (c): the tool answered without demanding payment at all — likely free,
+    # not broken. Distinguish this from a genuinely dead/misconfigured target.
+    if resp.status_code == 200:
+        return _done(
+            Status.WARN,
+            "this service appears to be free — no payment required "
+            f"(unpaid call to {ctx.paid_tool!r} returned 200)", ev)
+
+    # case (b): anything else non-402 means the target itself is unreachable or
+    # broken, not merely unpaywalled. Surface the real HTTP status, and flag the
+    # Render "no live backend bound to this host" signal when present.
     if resp.status_code != 402:
-        return CheckResult(
-            "C4", _c4.CHECK_NAME, Status.FAIL,
-            f"unpaid call to paid tool returned {resp.status_code}, expected 402 "
-            "(paywall missing or misrouted)", ev)
+        no_server = "no-server" in resp.headers.get("x-render-routing", "").lower()
+        note = " — host reports no-server (no live backend bound to this URL)" if no_server else ""
+        return _done(
+            Status.FAIL,
+            f"target unreachable: unpaid call returned HTTP {resp.status_code}, "
+            f"expected 402{note}", ev)
+
     try:
         challenge: PaymentRequiredV1 = parse_challenge(resp.json())
     except Exception as e:
-        return CheckResult("C4", _c4.CHECK_NAME, Status.FAIL,
-                           f"402 body is not a valid x402 v1 challenge: {e}", ev)
+        return _done(Status.FAIL, f"402 body is not a valid x402 v1 challenge: {e}", ev)
     if not challenge.accepts:
-        return CheckResult("C4", _c4.CHECK_NAME, Status.FAIL,
-                           "challenge has empty accepts[]", ev)
+        return _done(Status.FAIL, "challenge has empty accepts[]", ev)
     req = challenge.accepts[0]
     ctx.state["requirement"] = req
     ev.update({"scheme": req.scheme, "network": req.network,
                "amount_units": req.max_amount_required, "pay_to": req.pay_to,
                "asset": req.asset})
-    return CheckResult("C4", _c4.CHECK_NAME, Status.PASS,
-                       f"well-formed 402: {req.scheme} on {req.network}", ev)
+    return _done(Status.PASS, f"well-formed 402: {req.scheme} on {req.network}", ev)
+
+
+def _no_challenge_reason(ctx: RunContext) -> str:
+    """Derive why C5/C6 have nothing to work with, from C4's actual result."""
+    c4 = ctx.state.get("c4_result")
+    return c4.summary if c4 is not None else "no challenge captured in C4"
 
 
 async def _c5(ctx: RunContext) -> CheckResult:
     req = ctx.state.get("requirement")
     if req is None:
-        return CheckResult("C5", _c5.CHECK_NAME, Status.SKIP, "no challenge captured in C4")
+        return CheckResult("C5", _c5.CHECK_NAME, Status.SKIP,
+                           f"no challenge to evaluate — {_no_challenge_reason(ctx)}")
     if ctx.declared_price is None:
         return CheckResult("C5", _c5.CHECK_NAME, Status.SKIP, "no declared price supplied")
     quoted = units_to_usdt(req.max_amount_required)
@@ -112,7 +137,8 @@ async def _c5(ctx: RunContext) -> CheckResult:
 async def _c6(ctx: RunContext) -> CheckResult:
     req = ctx.state.get("requirement")
     if req is None:
-        return CheckResult("C6", _c6.CHECK_NAME, Status.SKIP, "no challenge captured in C4")
+        return CheckResult("C6", _c6.CHECK_NAME, Status.SKIP,
+                           f"no challenge to pay — {_no_challenge_reason(ctx)}")
     try:
         signed = ctx.payer.pay(req)
     except PayerRefused as e:
