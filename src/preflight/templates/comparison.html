@@ -36,6 +36,11 @@
     <span class="lbl">Best value</span>
     <span class="who">{{ c.winner_url }}</span>
   </div>
+  {% elif c.candidates and c.candidates | selectattr('challenge_outcome', 'equalto', 'unsupported_network') | list | length == c.candidates | length %}
+  <div class="verdict none">
+    <span class="lbl">Result</span>
+    <span class="who">No candidate payable — all quote a network/asset this payer can't settle</span>
+  </div>
   {% else %}
   <div class="verdict none">
     <span class="lbl">Result</span>
@@ -79,7 +84,7 @@
       <div class="rank">{{ loop.index }}{% if cand.target_url == c.winner_url %}<span class="crown">BEST</span>{% endif %}</div>
 
       <div class="svc">
-        <div class="name">{{ cand.target_url }}</div>
+        <div class="name">{{ cand.target_url }} <span class="toolnote">{{ 'MCP' if cand.shape == 'mcp' else 'HTTP' }}</span></div>
         {% if cand.wake_ms is not none %}
         <div class="wake">woke in {{ cand.wake_ms }}ms{% if cand.woke %} <span class="coldtag">cold start — excluded from latency</span>{% endif %}</div>
         {% endif %}

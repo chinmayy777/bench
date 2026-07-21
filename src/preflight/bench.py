@@ -11,15 +11,28 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
+
 from .models import Report, Status, now_iso
-from .payer import Payer
+from .payer import Payer, PayerRefused
 from .runner import run_preflight
 from .ssrf import TargetRejected
 from .store import new_report_id, save_comparison
 from .wake import WakeResult, wake_targets
+from .x402_probe import (
+    ChallengeParseError,
+    classify_payability,
+    extract_challenge_payload,
+    fetch_with_verb_fallback,
+    parse_challenge_payload,
+    payment_header_name,
+    settlement_header_name,
+)
+from .x402kit import units_to_usdt
 
 log = logging.getLogger("bench")
 
@@ -50,6 +63,13 @@ class Candidate:
     verdict: str = ""  # plain-language reason, filled by ranking
     wake_ms: int | None = None  # time to first /healthz response, from the wake phase
     woke: bool = False  # True if wake_ms implied a cold start (> 2000ms)
+    shape: str = "mcp"  # "mcp" (speaks the MCP handshake) or "http" (plain x402 resource)
+    # Only meaningful for shape="http": the x402_probe outcome for this target's
+    # own challenge — "unparseable" | "unsupported_network" | "payable" | None
+    # (None covers unreachable/free, and every "mcp"-shaped candidate).
+    challenge_outcome: str | None = None
+    network: str | None = None  # raw network string from the parsed challenge, if any
+    asset: str | None = None  # asset address from the parsed challenge, if any
 
     @property
     def usable(self) -> bool:
@@ -73,6 +93,10 @@ class Comparison:
     # url -> sorted tool names (excluding utilities), or None if listing failed.
     # Only populated when paid_tool inference was attempted.
     target_tools: dict[str, list[str] | None] = field(default_factory=dict)
+    # url -> "mcp" | "http", for every awake target, regardless of whether
+    # tool inference ran — always recorded so the report shows what shape
+    # each candidate actually was.
+    target_shapes: dict[str, str] = field(default_factory=dict)
 
 
 def _extract(report: Report) -> dict[str, Any]:
@@ -207,15 +231,126 @@ def _assign_verdicts(usable: list["Candidate"]) -> None:
             c.verdict = "Edged out on the overall balance"
 
 
-async def _list_target_tools(url: str) -> list[str] | None:
-    """Best-effort MCP tool listing, used only to infer a paid tool. None on any failure."""
+async def _classify_target(url: str) -> tuple[str, list[str] | None]:
+    """Attempt the MCP handshake; a failure means the target is a plain HTTP
+    x402 resource, not a broken MCP server. Returns ("mcp", sorted tool names)
+    or ("http", None)."""
     from fastmcp import Client
     try:
         async with Client(url, timeout=8.0) as client:
             tools = await client.list_tools()
-        return sorted(t.name for t in tools)
+        return "mcp", sorted(t.name for t in tools)
     except Exception:
-        return None
+        return "http", None
+
+
+@dataclass
+class _HttpProbeOutcome:
+    """Result of probing one plain-HTTP x402 resource directly."""
+    reachable: bool
+    purchased: bool
+    price_usdt: float | None
+    latency_ms: int | None
+    delivered_chars: int | None
+    tx_ref: str | None
+    note: str
+    challenge_outcome: str | None  # "unparseable" | "unsupported_network" | "payable" | None
+    network: str | None = None
+    asset: str | None = None
+
+
+async def _probe_http_resource(url: str, http: httpx.AsyncClient, payer: Payer) -> _HttpProbeOutcome:
+    """Probe a plain HTTP x402 resource — no MCP tool, no JSON-RPC framing.
+    The URL itself is the purchasable thing: price comes from the parsed
+    challenge, latency from the measured call, delivery from the raw payload
+    size of a successful paid response."""
+    from .config import settings
+
+    t0 = time.perf_counter()
+    try:
+        fetched = await fetch_with_verb_fallback(http, url, method="GET", timeout=15.0)
+    except httpx.HTTPError as e:
+        return _HttpProbeOutcome(False, False, None, None, None, None,
+                                 f"unreachable: {type(e).__name__}: {e}", None)
+    first_ms = int((time.perf_counter() - t0) * 1000)
+    resp = fetched.response
+
+    if resp.status_code == 200:
+        return _HttpProbeOutcome(True, False, None, first_ms, None, None,
+                                 "this service appears to be free — no payment required "
+                                 f"(unpaid {fetched.verb} call returned 200)", None)
+    if resp.status_code != 402:
+        return _HttpProbeOutcome(False, False, None, None, None, None,
+                                 f"unreachable: unpaid {fetched.verb} call returned "
+                                 f"HTTP {resp.status_code}, expected 402", None)
+
+    extracted = extract_challenge_payload(resp)
+    if extracted is None:
+        return _HttpProbeOutcome(
+            True, False, None, first_ms, None, None,
+            "402 challenge is unparseable: no JSON payload found in the "
+            "PAYMENT-REQUIRED header or the response body", "unparseable")
+    payload, source = extracted
+    try:
+        challenge = parse_challenge_payload(payload, source=source, verb=fetched.verb)
+    except ChallengeParseError as e:
+        return _HttpProbeOutcome(True, False, None, first_ms, None, None, str(e), "unparseable")
+
+    req = challenge.selected
+    try:
+        price_usdt = units_to_usdt(req.amount_units)
+    except (TypeError, ValueError):
+        price_usdt = None
+
+    outcome, msg = classify_payability(
+        challenge, allowed_networks=settings.allowed_pay_networks,
+        payer_label=f"our payer (supports {', '.join(settings.allowed_pay_networks)})")
+    if outcome == "unsupported_network":
+        return _HttpProbeOutcome(True, False, price_usdt, first_ms, None, None, msg,
+                                 "unsupported_network", network=req.network, asset=req.asset)
+
+    # Payable: attempt the real purchase, directly against the resource URL.
+    try:
+        signed = payer.pay(req)
+    except PayerRefused as e:
+        return _HttpProbeOutcome(True, False, price_usdt, first_ms, None, None,
+                                 f"payment not attempted: {e}", "payable",
+                                 network=req.network, asset=req.asset)
+
+    pay_header = payment_header_name(challenge.version)
+    t1 = time.perf_counter()
+    try:
+        paid_resp = await http.request(fetched.verb, url,
+                                       headers={pay_header: signed.header_value},
+                                       timeout=25.0, follow_redirects=True)
+    except httpx.HTTPError as e:
+        return _HttpProbeOutcome(True, False, price_usdt, first_ms, None, None,
+                                 f"paid call failed: {type(e).__name__}: {e}", "payable",
+                                 network=req.network, asset=req.asset)
+    paid_ms = int((time.perf_counter() - t1) * 1000)
+    settle_header = settlement_header_name(challenge.version)
+    tx_ref = paid_resp.headers.get(settle_header) or None
+
+    if paid_resp.status_code == 402:
+        return _HttpProbeOutcome(True, False, price_usdt, paid_ms, None, None,
+                                 "server rejected a validly signed payment (still 402) "
+                                 "— facilitator verify/settle is broken", "payable",
+                                 network=req.network, asset=req.asset)
+    if paid_resp.status_code != 200:
+        return _HttpProbeOutcome(True, False, price_usdt, paid_ms, None, None,
+                                 f"paid call returned {paid_resp.status_code}", "payable",
+                                 network=req.network, asset=req.asset)
+
+    delivered_chars = len(paid_resp.content)
+    if delivered_chars == 0:
+        return _HttpProbeOutcome(
+            True, True, price_usdt, paid_ms, 0, tx_ref,
+            "PAID BUT EMPTY: settlement succeeded and the resource delivered no content "
+            "— this is the worst customer experience possible", "payable",
+            network=req.network, asset=req.asset)
+    return _HttpProbeOutcome(True, True, price_usdt, paid_ms, delivered_chars, tx_ref,
+                             f"payment accepted, settled on {req.network}", "payable",
+                             network=req.network, asset=req.asset)
 
 
 async def compare_services(
@@ -259,54 +394,85 @@ async def compare_services(
         else:
             awake_targets.append(url)
 
-    # Infer paid_tool when the caller didn't name one: list each awake target's
-    # tools, exclude non-purchasable utilities, and intersect. Only an exact,
-    # unambiguous single match is used — anything else stops before any probing
-    # or purchase is attempted, so a missing/ambiguous paid_tool never gets
-    # reported as "no usable service" (that message is reserved for targets that
-    # were genuinely probed and failed).
+    # Classify each awake target independently — an MCP handshake either
+    # succeeds (it's an MCP server, possibly exposing a paid tool) or it
+    # doesn't (it's a plain HTTP x402 resource, where the URL itself is the
+    # purchasable thing). Always recorded, regardless of whether tool
+    # inference below is even needed, so the report shows what shape every
+    # candidate actually was.
+    target_shapes: dict[str, str] = {}
+    if awake_targets:
+        classified = await asyncio.gather(*(_classify_target(u) for u in awake_targets))
+        for url, (shape, names) in zip(awake_targets, classified):
+            target_shapes[url] = shape
+            target_tools[url] = names
+
+    mcp_targets = [u for u in awake_targets if target_shapes.get(u) == "mcp"]
+    http_targets = [u for u in awake_targets if target_shapes.get(u) == "http"]
+
+    # Tool inference applies only to MCP-shaped targets, and only when the
+    # caller didn't name a paid_tool: intersect their non-utility tool names.
+    # Only an exact, unambiguous single match is used. If every target is a
+    # plain HTTP resource, there is nothing to infer — that's not a failure,
+    # it just means inference never applies, so it's skipped outright rather
+    # than reported as "no paid tool could be inferred".
     inferred = False
     no_paid_tool = False
     effective_paid_tool = paid_tool
 
-    if not effective_paid_tool:
-        listed = await asyncio.gather(*(_list_target_tools(u) for u in awake_targets))
-        for url, names in zip(awake_targets, listed):
-            target_tools[url] = names
+    if not effective_paid_tool and mcp_targets:
         pools = [
-            {n for n in names if n.lower() not in _UTILITY_TOOLS}
-            for names in target_tools.values() if names is not None
+            {n for n in (target_tools[u] or []) if n.lower() not in _UTILITY_TOOLS}
+            for u in mcp_targets
         ]
         common = set.intersection(*pools) if pools else set()
         if len(common) == 1:
             effective_paid_tool = next(iter(common))
             inferred = True
-        else:
+        elif not http_targets:
+            # Every target is MCP-shaped and none has a resolvable common
+            # tool — nothing to compare at all, exactly as before.
             no_paid_tool = True
+        # else: a mixed set where MCP-side inference failed. The HTTP subset
+        # is still fully probeable below; the MCP subset (no tool name to
+        # call) is recorded per-candidate further down, not a whole-run abort.
 
     if no_paid_tool:
         comp = Comparison(
             id=new_report_id(), created_at=now_iso(), task=task or "comparison",
             candidates=candidates, winner_url=None, total_spend_usdt=0.0, tx_refs=[],
             paid_tool=None, paid_tool_inferred=False, no_paid_tool=True,
-            target_tools=target_tools,
+            target_tools=target_tools, target_shapes=target_shapes,
         )
         save_comparison(comp)
         return comp
+
+    # MCP-shaped targets left without any resolvable paid tool (the mixed-set
+    # case above) can't be probed at all — recorded precisely, without
+    # implying they're broken, and excluded from the probe phase below.
+    if mcp_targets and not effective_paid_tool:
+        for url in mcp_targets:
+            wake_ms, woke = _wake_fields(url)
+            candidates.append(Candidate(
+                url, True, False, None, None, None, None, report_id="",
+                notes=["no common paid tool could be inferred among the MCP-shaped "
+                       "targets in this comparison"],
+                wake_ms=wake_ms, woke=woke, shape="mcp"))
+        mcp_targets = []
 
     claims = {k: v for k, v in {
         "paid_tool": effective_paid_tool, "price_usdt": price_usdt,
         "sample_args": sample_args or {},
     }.items() if v is not None}
 
-    async def probe(url: str) -> Candidate:
+    async def probe_mcp(url: str) -> Candidate:
         wake_ms, woke = _wake_fields(url)
         try:
             report = await run_preflight(url, dict(claims), payer=payer)
         except TargetRejected as e:
             return Candidate(url, False, False, None, None, None, None,
                              report_id="", notes=[f"rejected: {e}"],
-                             wake_ms=wake_ms, woke=woke)
+                             wake_ms=wake_ms, woke=woke, shape="mcp")
         m = _extract(report)
         notes = []
         if not m["reachable"]:
@@ -319,19 +485,42 @@ async def compare_services(
             target_url=url, reachable=m["reachable"], purchased=m["purchased"],
             price_usdt=m["price"], latency_ms=m["latency"],
             delivered_chars=m["delivered"], tx_ref=(report.tx_refs[0] if report.tx_refs else None),
-            report_id=report.id, notes=notes, wake_ms=wake_ms, woke=woke,
+            report_id=report.id, notes=notes, wake_ms=wake_ms, woke=woke, shape="mcp",
         )
 
-    # On a real chain, purchases from candidates that settle via the same relayer
-    # wallet must be sequential to avoid nonce collisions. In mock mode there is
-    # no chain nonce, so run concurrently for speed. We can't know each target's
-    # relayer up front, so we gate on the payer's own mode as the signal: a
-    # testnet payer implies real settlement downstream.
-    if awake_targets:
+    async def probe_http(url: str, http: httpx.AsyncClient) -> Candidate:
+        wake_ms, woke = _wake_fields(url)
+        outcome = await _probe_http_resource(url, http, payer)
+        return Candidate(
+            target_url=url, reachable=outcome.reachable, purchased=outcome.purchased,
+            price_usdt=outcome.price_usdt, latency_ms=outcome.latency_ms,
+            delivered_chars=outcome.delivered_chars, tx_ref=outcome.tx_ref,
+            report_id="", notes=[outcome.note] if outcome.note else [],
+            wake_ms=wake_ms, woke=woke, shape="http",
+            challenge_outcome=outcome.challenge_outcome,
+            network=outcome.network, asset=outcome.asset,
+        )
+
+    async def _probe_all(http: httpx.AsyncClient | None) -> list[Candidate]:
+        tasks = [probe_mcp(u) for u in mcp_targets]
+        if http is not None:
+            tasks += [probe_http(u, http) for u in http_targets]
+        # On a real chain, purchases from candidates that settle via the same
+        # relayer wallet must be sequential to avoid nonce collisions. In mock
+        # mode there is no chain nonce, so run concurrently for speed. We
+        # can't know each target's relayer up front, so we gate on the
+        # payer's own mode as the signal: a testnet payer implies real
+        # settlement downstream.
         if settings.payer_mode == "testnet":
-            candidates.extend([await probe(u) for u in awake_targets])  # sequential: one tx at a time
+            return [await t for t in tasks]
+        return list(await asyncio.gather(*tasks))
+
+    if mcp_targets or http_targets:
+        if http_targets:
+            async with httpx.AsyncClient(follow_redirects=False) as http:
+                candidates.extend(await _probe_all(http))
         else:
-            candidates.extend(await asyncio.gather(*(probe(u) for u in awake_targets)))
+            candidates.extend(await _probe_all(None))
     _rank(candidates)
     candidates.sort(key=lambda c: (c.usable, c.value_score), reverse=True)
 
@@ -345,7 +534,7 @@ async def compare_services(
         candidates=candidates, winner_url=winner,
         total_spend_usdt=total_spend, tx_refs=tx_refs,
         paid_tool=effective_paid_tool, paid_tool_inferred=inferred, no_paid_tool=False,
-        target_tools=target_tools,
+        target_tools=target_tools, target_shapes=target_shapes,
     )
     save_comparison(comp)
     return comp
@@ -372,25 +561,41 @@ def comparison_markdown(comp: Comparison, base_url: str) -> str:
         lines.append(f"\nFull comparison: {base_url}/compare/{comp.id}")
         return "\n".join(lines)
 
+    all_unpayable = (
+        bool(comp.candidates) and not comp.winner_url
+        and all(c.challenge_outcome == "unsupported_network" for c in comp.candidates)
+    )
+
     if comp.winner_url:
         lines.append(f"**Best value: {comp.winner_url}**\n")
+    elif all_unpayable:
+        named = "; ".join(
+            f"{c.target_url} — {c.network}" + (f" (asset {c.asset})" if c.asset else "")
+            for c in comp.candidates
+        )
+        lines.append(
+            f"**No candidate is payable.** All {len(comp.candidates)} quote a network or "
+            f"asset this payer cannot settle — not a service failure: {named}\n"
+        )
     else:
         lines.append("**No usable service among the candidates.**\n")
     if comp.paid_tool_inferred:
         lines.append(
             f"_Paid tool not supplied — inferred as `{comp.paid_tool}`, "
-            "the one tool common to every target._\n"
+            "the one tool common to every MCP-shaped target._\n"
         )
-    lines.append("| Service | Score | Price | Latency | Delivered | Wake | Status |")
-    lines.append("|---|---|---|---|---|---|---|")
+    lines.append("| Service | Shape | Score | Price | Latency | Delivered | Wake | Status |")
+    lines.append("|---|---|---|---|---|---|---|---|")
     for c in comp.candidates:
+        shape = "MCP" if c.shape == "mcp" else "HTTP"
         price = f"{c.price_usdt}" if c.price_usdt is not None else "—"
         lat = f"{c.latency_ms}ms" if c.latency_ms is not None else "—"
         deliv = f"{c.delivered_chars}c" if c.delivered_chars is not None else "—"
         wake = "—" if c.wake_ms is None else f"{c.wake_ms}ms" + (" (cold)" if c.woke else "")
         status = "✅ usable" if c.usable else ("⚠️ " + ", ".join(c.notes) if c.notes else "—")
         score = f"{c.value_score}" if c.usable else "—"
-        lines.append(f"| {c.target_url} | {score} | {price} | {lat} | {deliv} | {wake} | {status} |")
+        lines.append(f"| {c.target_url} | {shape} | {score} | {price} | {lat} | "
+                     f"{deliv} | {wake} | {status} |")
     if comp.total_spend_usdt:
         lines.append(f"\nTotal test spend: {comp.total_spend_usdt} (non-mainnet)")
     lines.append(f"\nFull comparison: {base_url}/compare/{comp.id}")

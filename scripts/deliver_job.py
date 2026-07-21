@@ -103,7 +103,11 @@ def _parse_table(md: str) -> tuple[list[str], list[list[str]]]:
 
 def _build_rows(md: str, permalink: str | None) -> tuple[list[Row], bool]:
     """Returns (rows, no_paid_tool). tx hash / verdict are attached to usable
-    rows in table order, pulled from the permalink page in the same order."""
+    rows in table order, pulled from the permalink page in the same order.
+
+    Cells are looked up by header name, not fixed position — Bench's scorecard
+    has grown columns before (e.g. a Shape column for HTTP-vs-MCP candidates)
+    and will again; positional unpacking would silently misalign every field."""
     header, raw_rows = _parse_table(md)
     if "Tools exposed" in header:
         return [], True
@@ -114,10 +118,21 @@ def _build_rows(md: str, permalink: str | None) -> tuple[list[Row], bool]:
     tx_iter = iter(extras["tx_hashes"])
     verdict_iter = iter(extras["verdicts"])
 
+    idx = {name: i for i, name in enumerate(header)}
+
+    def cell(cells: list[str], name: str, default: str = "—") -> str:
+        i = idx.get(name)
+        return cells[i] if i is not None and i < len(cells) else default
+
     rows = []
     for cells in raw_rows:
-        cells = (cells + [""] * 7)[:7]
-        service, score, price, latency, delivered, wake, status = cells
+        service = cell(cells, "Service", "")
+        score = cell(cells, "Score")
+        price = cell(cells, "Price")
+        latency = cell(cells, "Latency")
+        delivered = cell(cells, "Delivered")
+        wake = cell(cells, "Wake")
+        status = cell(cells, "Status")
         usable = status.startswith("✅")
         tx = next(tx_iter, None) if usable else None
         verdict = next(verdict_iter, None) if usable else None

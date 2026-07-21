@@ -134,6 +134,40 @@ def test_all_targets_unreachable_case(monkeypatch):
     assert re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", doc)
 
 
+SHAPE_MD = """# Bench comparison — shape column test
+
+**Best value: https://plain-http.example/resource**
+
+| Service | Shape | Score | Price | Latency | Delivered | Wake | Status |
+|---|---|---|---|---|---|---|---|
+| https://plain-http.example/resource | HTTP | 80.0 | 0.02 | 100ms | 50c | 10ms | ✅ usable |
+| https://mcp-vendor.example/mcp/ | MCP | 40.0 | 0.10 | 300ms | 20c | 15ms | ✅ usable |
+
+Full comparison: https://bench-pyfg.onrender.com/compare/shapeTest"""
+
+
+def test_extra_shape_column_does_not_misalign_fields(monkeypatch):
+    """Bench's scorecard gained a Shape column (HTTP-vs-MCP candidates); rows
+    must still be read by header name, not silently shifted by position."""
+    fake = _mock_bench(monkeypatch, SHAPE_MD, {"tx_hashes": [], "verdicts": []})
+
+    doc, one_liner = deliver_job.build_deliverable(
+        job_id="job-shape",
+        targets=["https://plain-http.example/resource", "https://mcp-vendor.example/mcp/"],
+        paid_tool=None, task="shape column test",
+        bench_url="https://bench-pyfg.onrender.com/mcp/",
+    )
+    assert fake.calls  # bench was actually called
+
+    assert "https://plain-http.example/resource is the best value" in one_liner
+    # deliver_job re-renders its own condensed table (service/score/price/...),
+    # dropping Shape — the real score/price must land in the right columns,
+    # never shifted by the extra Shape column ("HTTP"/"MCP" must not appear
+    # where Score belongs).
+    assert "| https://plain-http.example/resource | 80.0 | 0.02 | 100ms | 50c | 10ms | ✅ usable |" in doc
+    assert "| https://mcp-vendor.example/mcp/ | 40.0 | 0.10 | 300ms | 20c | 15ms | ✅ usable |" in doc
+
+
 def test_bench_call_failure_still_produces_a_status_report(monkeypatch):
     async def raising_call_bench(bench_url, targets, paid_tool, task):
         raise RuntimeError("connection refused")

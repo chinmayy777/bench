@@ -108,6 +108,7 @@ _COMPARISONS_NEW_COLUMNS = (
     ("paid_tool_inferred", "INTEGER"),
     ("no_paid_tool", "INTEGER"),
     ("target_tools_json", "TEXT"),
+    ("target_shapes_json", "TEXT"),
 )
 
 
@@ -131,13 +132,14 @@ def save_comparison(comp) -> None:
         con.execute(
             "INSERT OR REPLACE INTO comparisons "
             "(id, created_at, task, candidates_json, winner_url, total_spend_usdt, "
-            "tx_refs_json, paid_tool, paid_tool_inferred, no_paid_tool, target_tools_json) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "tx_refs_json, paid_tool, paid_tool_inferred, no_paid_tool, target_tools_json, "
+            "target_shapes_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (comp.id, comp.created_at, comp.task,
              _json.dumps([asdict(c) for c in comp.candidates]),
              comp.winner_url, comp.total_spend_usdt, _json.dumps(comp.tx_refs),
              comp.paid_tool, int(comp.paid_tool_inferred), int(comp.no_paid_tool),
-             _json.dumps(comp.target_tools)))
+             _json.dumps(comp.target_tools), _json.dumps(comp.target_shapes)))
 
 
 def load_comparison(comp_id: str):
@@ -161,4 +163,5 @@ def load_comparison(comp_id: str):
         paid_tool_inferred=bool(row["paid_tool_inferred"]) if "paid_tool_inferred" in keys and row["paid_tool_inferred"] is not None else False,
         no_paid_tool=bool(row["no_paid_tool"]) if "no_paid_tool" in keys and row["no_paid_tool"] is not None else False,
         target_tools=_json.loads(row["target_tools_json"]) if "target_tools_json" in keys and row["target_tools_json"] is not None else {},
+        target_shapes=_json.loads(row["target_shapes_json"]) if "target_shapes_json" in keys and row["target_shapes_json"] is not None else {},
     )
