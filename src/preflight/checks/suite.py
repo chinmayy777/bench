@@ -4,11 +4,18 @@ from __future__ import annotations
 import statistics
 import time
 
-from x402.schemas.v1 import PaymentRequiredV1
-
 from ..models import CheckResult, Status
 from ..payer import PayerRefused
-from ..x402kit import parse_challenge, units_to_usdt
+from ..x402_probe import (
+    ChallengeParseError,
+    classify_payability,
+    extract_challenge_payload,
+    fetch_with_verb_fallback,
+    parse_challenge_payload,
+    payment_header_name,
+    settlement_header_name,
+)
+from ..x402kit import units_to_usdt
 from . import RunContext, call_tool_raw, excerpt, mcp_client, timed
 
 
@@ -34,8 +41,18 @@ async def _c1(ctx: RunContext) -> CheckResult:
 
 
 async def _c2(ctx: RunContext) -> CheckResult:
-    async with mcp_client(ctx) as client:
-        tools = await client.list_tools()
+    # Not every x402 resource is an MCP server — plain marketplace REST
+    # endpoints don't speak the MCP handshake at all. That's not brokenness,
+    # so it must degrade to a clear, non-gating report rather than crashing
+    # into "check crashed: ..." or reading as "unreachable" (C1 already
+    # covers real reachability).
+    try:
+        async with mcp_client(ctx) as client:
+            tools = await client.list_tools()
+    except Exception as e:
+        return CheckResult("C2", _c2.CHECK_NAME, Status.SKIP,
+                           "not an MCP endpoint — MCP handshake did not complete",
+                           {"error": f"{type(e).__name__}: {e}"})
     names = sorted(t.name for t in tools)
     ctx.state["actual_tools"] = names
     if not names:
@@ -70,12 +87,23 @@ async def _c4(ctx: RunContext) -> CheckResult:
         ctx.state["c4_result"] = res
         return res
 
-    if not ctx.paid_tool:
-        return _done(Status.SKIP,
-                     "no paid tool named and none could be inferred — nothing to paywall-check")
+    from ..config import settings
 
-    resp = await call_tool_raw(ctx, ctx.paid_tool, ctx.claims.get("sample_args", {}))
-    ev = {"status_code": resp.status_code, "body_excerpt": excerpt(resp.text)}
+    # Two probe modes: a declared MCP tool is called via JSON-RPC tools/call
+    # (the BrokenBazaar-style fixture shape); with none declared, the target
+    # URL itself is the priced resource — the real shape for marketplace ASPs,
+    # which are plain HTTP paths, not MCP servers. Both converge on the same
+    # version-agnostic parsing below.
+    if ctx.paid_tool:
+        resp = await call_tool_raw(ctx, ctx.paid_tool, ctx.claims.get("sample_args", {}))
+        verb = "POST"
+    else:
+        method = ctx.claims.get("probe_method", "GET")
+        fetched = await fetch_with_verb_fallback(ctx.http, ctx.target_url, method=method)
+        resp, verb = fetched.response, fetched.verb
+    ctx.state["c4_verb"] = verb
+
+    ev = {"status_code": resp.status_code, "body_excerpt": excerpt(resp.text), "verb": verb}
 
     # case (c): the tool answered without demanding payment at all — likely free,
     # not broken. Distinguish this from a genuinely dead/misconfigured target.
@@ -83,7 +111,7 @@ async def _c4(ctx: RunContext) -> CheckResult:
         return _done(
             Status.WARN,
             "this service appears to be free — no payment required "
-            f"(unpaid call to {ctx.paid_tool!r} returned 200)", ev)
+            f"(unpaid {verb} call returned 200)", ev)
 
     # case (b): anything else non-402 means the target itself is unreachable or
     # broken, not merely unpaywalled. Surface the real HTTP status, and flag the
@@ -93,21 +121,39 @@ async def _c4(ctx: RunContext) -> CheckResult:
         note = " — host reports no-server (no live backend bound to this URL)" if no_server else ""
         return _done(
             Status.FAIL,
-            f"target unreachable: unpaid call returned HTTP {resp.status_code}, "
+            f"target unreachable: unpaid {verb} call returned HTTP {resp.status_code}, "
             f"expected 402{note}", ev)
 
+    # Outcome 1 of 3: unparseable — name precisely what's missing rather than
+    # a generic "malformed 402".
+    extracted = extract_challenge_payload(resp)
+    if extracted is None:
+        return _done(Status.FAIL,
+                     "402 challenge is unparseable: no JSON payload found in the "
+                     "PAYMENT-REQUIRED header or the response body", ev)
+    payload, source = extracted
+    ev["source"] = source
     try:
-        challenge: PaymentRequiredV1 = parse_challenge(resp.json())
-    except Exception as e:
-        return _done(Status.FAIL, f"402 body is not a valid x402 v1 challenge: {e}", ev)
-    if not challenge.accepts:
-        return _done(Status.FAIL, "challenge has empty accepts[]", ev)
-    req = challenge.accepts[0]
+        challenge = parse_challenge_payload(payload, source=source, verb=verb)
+    except ChallengeParseError as e:
+        return _done(Status.FAIL, str(e), ev)
+
+    req = challenge.selected
     ctx.state["requirement"] = req
-    ev.update({"scheme": req.scheme, "network": req.network,
-               "amount_units": req.max_amount_required, "pay_to": req.pay_to,
-               "asset": req.asset})
-    return _done(Status.PASS, f"well-formed 402: {req.scheme} on {req.network}", ev)
+    ctx.state["challenge_version"] = challenge.version
+    ev.update({
+        "x402_version": challenge.version, "scheme": req.scheme, "network": req.network,
+        "chain_id": req.chain_id, "amount_units": req.amount_units, "pay_to": req.pay_to,
+        "asset": req.asset, "alternative_schemes": [a.scheme for a in challenge.alternatives],
+    })
+
+    # Outcomes 2 and 3 of 3: parsed-but-unpayable-here, or parsed-and-payable.
+    outcome, msg = classify_payability(
+        challenge, allowed_networks=settings.allowed_pay_networks,
+        payer_label=f"our payer (supports {', '.join(settings.allowed_pay_networks)})")
+    if outcome == "unsupported_network":
+        return _done(Status.WARN, msg, ev)
+    return _done(Status.PASS, msg, ev)
 
 
 def _no_challenge_reason(ctx: RunContext) -> str:
@@ -144,12 +190,27 @@ async def _c6(ctx: RunContext) -> CheckResult:
     except PayerRefused as e:
         return CheckResult("C6", _c6.CHECK_NAME, Status.SKIP, f"payment not attempted: {e}",
                            {"policy": str(e)})
-    resp = await call_tool_raw(ctx, ctx.paid_tool, ctx.claims.get("sample_args", {}),
-                               headers={"X-PAYMENT": signed.header_value}, timeout=20.0)
+
+    # Use the header the *detected* protocol version expects to receive a
+    # signed payment in, and read settlement back from its matching response
+    # header — v1 and v2 name both differently.
+    version = ctx.state.get("challenge_version", 1)
+    pay_header = payment_header_name(version)
+    settle_header = settlement_header_name(version)
+
+    if ctx.paid_tool:
+        resp = await call_tool_raw(ctx, ctx.paid_tool, ctx.claims.get("sample_args", {}),
+                                   headers={pay_header: signed.header_value}, timeout=20.0)
+    else:
+        verb = ctx.state.get("c4_verb", "GET")
+        resp = await ctx.http.request(verb, ctx.target_url,
+                                      headers={pay_header: signed.header_value},
+                                      timeout=20.0, follow_redirects=True)
+
     ev = {"payer": signed.from_address, "nonce": signed.nonce,
           "amount_usdt": units_to_usdt(signed.amount_units), "network": signed.network,
           "status_code": resp.status_code,
-          "settle_header": resp.headers.get("x-payment-response", "")}
+          "settle_header": resp.headers.get(settle_header, "")}
     ctx.state["paid_status"] = resp.status_code
     if resp.status_code == 402:
         return CheckResult("C6", _c6.CHECK_NAME, Status.FAIL,

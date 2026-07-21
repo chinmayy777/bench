@@ -92,7 +92,13 @@ def sign_exact_payment(private_key: str, req: PaymentRequirementsV1) -> SignedPa
     now = int(time.time())
     extra = req.extra or {}
     net = KNOWN_NETWORKS.get(req.network, {})
-    chain_id = int(extra.get("chainId") or net.get("chain_id"))
+    # Fall back to CAIP-2 parsing ("eip155:196" -> 196) for networks the kit
+    # doesn't know by name and whose challenge omits an explicit chainId —
+    # real v2 challenges carry the chain id in the network string itself.
+    chain_id = extra.get("chainId") or net.get("chain_id") or getattr(req, "chain_id", None)
+    if chain_id is None:
+        raise ValueError(f"cannot determine chain id for network {req.network!r}")
+    chain_id = int(chain_id)
     token_name = extra.get("name") or net.get("name")
     token_version = extra.get("version") or net.get("version", "1")
 
