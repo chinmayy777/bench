@@ -16,6 +16,9 @@ class Settings:
     # restarts. Either absent -> falls back to db_path above, unchanged.
     turso_database_url: str = os.getenv("TURSO_DATABASE_URL", "")
     turso_auth_token: str = os.getenv("TURSO_AUTH_TOKEN", "")
+    # Embedded replica needs a real local file — libsql's WAL mode can't
+    # attach to ":memory:" (fails with "wal_insert_begin failed").
+    turso_replica_path: str = os.getenv("TURSO_REPLICA_PATH", "/tmp/tender-replica.db")
     payer_mode: str = os.getenv("PAYER_MODE", "mock")  # off | mock | testnet
     payer_private_key: str = os.getenv("PAYER_PRIVATE_KEY", "")
     allow_local_targets: bool = _flag("ALLOW_LOCAL_TARGETS")

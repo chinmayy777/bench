@@ -64,6 +64,117 @@ def test_fallback_report_roundtrip_uses_local_sqlite_file(monkeypatch, tmp_path)
     assert loaded.results[0].status == Status.PASS
 
 
+def test_turso_replica_uses_real_file_path_not_memory(monkeypatch, tmp_path):
+    """The embedded replica must be given a real file — libsql's WAL-based
+    replica fails with 'wal_insert_begin failed' against ':memory:'."""
+    import libsql
+
+    seen = {}
+
+    def fake_connect(path, **kwargs):
+        seen["path"] = path
+        raise RuntimeError("stop before any real network call")
+
+    monkeypatch.setattr(libsql, "connect", fake_connect)
+    replica_path = str(tmp_path / "replica.db")
+    monkeypatch.setattr(config_module, "settings", dataclasses.replace(
+        config_module.settings, turso_database_url="libsql://example.turso.io",
+        turso_auth_token="some-token", turso_replica_path=replica_path,
+        db_path=str(tmp_path / "fallback.db")))
+
+    report = Report(id="path-check", created_at=now_iso(), target_url="http://x.example/mcp/",
+                    claims={}, results=[], overall="PASS")
+    store.save_report(report)  # must not raise — falls back to sqlite
+
+    assert seen["path"] == replica_path
+    assert seen["path"] != ":memory:"
+
+
+def test_turso_connect_failure_falls_back_to_sqlite_without_500ing(monkeypatch, tmp_path):
+    import libsql
+
+    def raising_connect(path, **kwargs):
+        raise RuntimeError("network unreachable")
+
+    monkeypatch.setattr(libsql, "connect", raising_connect)
+    db_file = tmp_path / "fallback_on_connect_failure.db"
+    monkeypatch.setattr(config_module, "settings", dataclasses.replace(
+        config_module.settings, turso_database_url="libsql://example.turso.io",
+        turso_auth_token="some-token", turso_replica_path=str(tmp_path / "replica.db"),
+        db_path=str(db_file)))
+
+    report = Report(id="connect-fail-1", created_at=now_iso(), target_url="http://x.example/mcp/",
+                    claims={}, results=[], overall="PASS", spend_usdt=0.01)
+    store.save_report(report)  # must not raise
+
+    assert db_file.exists()  # actually persisted, just via the fallback
+    loaded = store.load_report("connect-fail-1")
+    assert loaded is not None and loaded.spend_usdt == 0.01
+
+
+def test_turso_sync_failure_falls_back_to_sqlite_without_500ing(monkeypatch, tmp_path):
+    import libsql
+
+    class _FakeConn:
+        def sync(self):
+            raise RuntimeError("sync failed: server unavailable")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(libsql, "connect", lambda path, **kwargs: _FakeConn())
+    db_file = tmp_path / "fallback_on_sync_failure.db"
+    monkeypatch.setattr(config_module, "settings", dataclasses.replace(
+        config_module.settings, turso_database_url="libsql://example.turso.io",
+        turso_auth_token="some-token", turso_replica_path=str(tmp_path / "replica.db"),
+        db_path=str(db_file)))
+
+    report = Report(id="sync-fail-1", created_at=now_iso(), target_url="http://x.example/mcp/",
+                    claims={}, results=[], overall="PASS", spend_usdt=0.02)
+    store.save_report(report)  # must not raise
+
+    assert db_file.exists()
+    loaded = store.load_report("sync-fail-1")
+    assert loaded is not None and loaded.spend_usdt == 0.02
+
+
+def test_turso_push_sync_failure_still_commits_locally(monkeypatch, tmp_path):
+    """The initial pull-sync succeeds, but the post-commit push-sync fails —
+    the write must still land (in the local replica file) rather than raise."""
+    import libsql
+
+    class _FlakyPushConn:
+        def __init__(self):
+            self.sync_calls = 0
+
+        def executescript(self, sql):
+            pass
+
+        def execute(self, sql, params=()):
+            pass
+
+        def commit(self):
+            pass
+
+        def sync(self):
+            self.sync_calls += 1
+            if self.sync_calls > 1:
+                raise RuntimeError("push-sync failed: server unavailable")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(libsql, "connect", lambda path, **kwargs: _FlakyPushConn())
+    monkeypatch.setattr(config_module, "settings", dataclasses.replace(
+        config_module.settings, turso_database_url="libsql://example.turso.io",
+        turso_auth_token="some-token", turso_replica_path=str(tmp_path / "replica.db"),
+        db_path=str(tmp_path / "unused.db")))
+
+    report = Report(id="push-fail-1", created_at=now_iso(), target_url="http://x.example/mcp/",
+                    claims={}, results=[], overall="PASS")
+    store.save_report(report)  # must not raise despite the push-sync failure
+
+
 def test_fallback_comparison_roundtrip_uses_local_sqlite_file(monkeypatch, tmp_path):
     db_file = tmp_path / "fallback_comparisons.db"
     _with_turso_settings(monkeypatch, database_url="", auth_token="", db_path=str(db_file))

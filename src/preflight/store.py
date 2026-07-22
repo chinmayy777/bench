@@ -5,15 +5,24 @@ TURSO_DATABASE_URL and TURSO_AUTH_TOKEN are set, storage instead goes through
 Turso (libSQL) — an embedded replica that syncs with the remote database on
 every connection — so comparisons/reports survive container restarts on
 ephemeral hosts. Either var absent falls back to the local sqlite file.
+
+The embedded replica needs a real local file (TURSO_REPLICA_PATH) — libsql's
+WAL-based replica can't attach to ":memory:". If the Turso connection or a
+sync ever raises (network hiccup, bad token, replica file trouble), we log a
+warning and fall back to local sqlite for that request rather than 500ing —
+a storage blip must never take the comparison pages down.
 """
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 import sqlite3
 from contextlib import contextmanager
 
 from .models import CheckResult, Report, Status
+
+log = logging.getLogger("preflight.store")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS reports (
@@ -38,19 +47,36 @@ def _using_turso() -> bool:
 def _conn():
     from .config import settings
     turso = bool(settings.turso_database_url and settings.turso_auth_token)
+    con = None
     if turso:
-        import libsql
-        con = libsql.connect(":memory:", sync_url=settings.turso_database_url,
-                             auth_token=settings.turso_auth_token)
-        con.sync()  # pull current remote state into this fresh replica
-    else:
+        try:
+            import libsql
+            con = libsql.connect(settings.turso_replica_path,
+                                 sync_url=settings.turso_database_url,
+                                 auth_token=settings.turso_auth_token)
+            con.sync()  # pull current remote state into this local replica
+        except Exception as e:
+            log.warning("Turso connect/sync failed (%s); falling back to local sqlite at %s",
+                       e, settings.db_path)
+            if con is not None:
+                try:
+                    con.close()
+                except Exception:
+                    pass
+            con = None
+            turso = False
+    if con is None:
         con = sqlite3.connect(settings.db_path)
     try:
         con.executescript(_SCHEMA)
         yield con
         con.commit()
         if turso:
-            con.sync()  # push writes back to the remote database
+            try:
+                con.sync()  # push writes back to the remote database
+            except Exception as e:
+                log.warning("Turso push-sync failed (%s); write committed to the local "
+                           "replica only, will sync on a later successful connection", e)
     finally:
         con.close()
 
