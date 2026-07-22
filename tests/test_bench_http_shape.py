@@ -103,6 +103,25 @@ class UnpayableHttpApp:
         await _send_json(send, 402, challenge)
 
 
+class FreeHttpApp:
+    """A plain-HTTP resource with no x402 gate at all — answers every GET
+    (besides /healthz) directly with 200 and the given payload."""
+
+    def __init__(self, *, content: bytes):
+        self.content = content
+
+    async def __call__(self, scope, receive, send):
+        if await _handle_lifespan(scope, receive, send):
+            return
+        assert scope["type"] == "http"
+        if scope.get("path", "").rstrip("/") == "/healthz":
+            await _send_json(send, 200, {"ok": True})
+            return
+        await send({"type": "http.response.start", "status": 200,
+                   "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": self.content})
+
+
 PAY_TO_A = "0x2f7cF9d979A98d0C4Cd2c92c8DC0d9DFf4a04d2A"
 PAY_TO_B = "0xe7bbb197827048ba8fa7e908ec871b80568dbc25"
 ASSET_A = "0x779ded0c9e1022225f8e0630b35a9b54be713736"
@@ -179,3 +198,81 @@ class TestAllUnpayable:
         assert _urls([8965])[0] in md and _urls([8966])[0] in md
         assert "No usable service among the candidates" not in md
         assert "broken" not in md.lower()
+
+
+class TestAllFree:
+    def test_all_free_ranked_on_latency_and_delivery(self, server_factory):
+        import asyncio
+
+        with server_factory(FreeHttpApp(content=b'{"data": "tiny"}'), 8967), \
+             server_factory(FreeHttpApp(content=b'{"data": "a much bigger payload here"}'), 8968):
+            comp = asyncio.run(compare_services(_urls([8967, 8968]), task="all free"))
+
+        assert comp.no_paid_tool is False
+        assert len(comp.candidates) == 2
+        assert all(c.free for c in comp.candidates)
+        assert all(c.purchased is False for c in comp.candidates)
+        assert all(c.price_usdt == 0.0 for c in comp.candidates)
+        assert all(c.usable for c in comp.candidates)  # first-class, not excluded
+        assert all(c.delivered_chars and c.delivered_chars > 0 for c in comp.candidates)
+        assert comp.winner_url is not None
+        # price is tied at 0 for both — delivery/latency must have actually
+        # broken the tie, not left every candidate at a default score
+        assert len({c.value_score for c in comp.candidates}) == 2
+
+        md = comparison_markdown(comp, "http://base")
+        assert "All candidates are free" in md
+        assert "latency and delivery" in md
+        assert "| ✅ free |" in md or "✅ free" in md
+        assert "No usable service among the candidates" not in md
+        assert "No candidate is payable" not in md
+
+
+class TestMixedFreeAndPayable:
+    def test_free_and_payable_ranked_together(self, server_factory):
+        import asyncio
+
+        with server_factory(FreeHttpApp(content=b'{"data": "free tier"}'), 8969), \
+             server_factory(PlainHttpX402App(price_usdt=0.02, pay_to=PAY_TO_A,
+                                              content=b'{"data": "paid tier, richer"}'), 8970):
+            comp = asyncio.run(compare_services(_urls([8969, 8970]), task="free vs payable"))
+
+        assert len(comp.candidates) == 2
+        by_url = {c.target_url: c for c in comp.candidates}
+        free_c = by_url[_urls([8969])[0]]
+        paid_c = by_url[_urls([8970])[0]]
+
+        assert free_c.free is True and free_c.price_usdt == 0.0 and free_c.usable
+        assert paid_c.free is False and paid_c.purchased is True and paid_c.usable
+        assert comp.winner_url is not None  # both ranked together, someone won
+
+        md = comparison_markdown(comp, "http://base")
+        assert "✅ free" in md and "✅ usable" in md
+        assert "All candidates are free" not in md  # not all of them are
+
+
+class TestFreePlusUnpayable:
+    def test_free_wins_unpayable_listed_separately(self, server_factory):
+        import asyncio
+
+        with server_factory(FreeHttpApp(content=b'{"data": "free and open"}'), 8971), \
+             server_factory(UnpayableHttpApp(pay_to=PAY_TO_B, asset=ASSET_A), 8972):
+            comp = asyncio.run(compare_services(_urls([8971, 8972]), task="free plus unpayable"))
+
+        assert len(comp.candidates) == 2
+        by_url = {c.target_url: c for c in comp.candidates}
+        free_c = by_url[_urls([8971])[0]]
+        dead_c = by_url[_urls([8972])[0]]
+
+        assert free_c.free is True and free_c.usable
+        assert comp.winner_url == free_c.target_url
+
+        assert dead_c.usable is False
+        assert dead_c.challenge_outcome == "unsupported_network"
+        assert dead_c.network == "eip155:196"
+        assert dead_c.value_score == 0.0  # never scored
+
+        md = comparison_markdown(comp, "http://base")
+        assert f"**Best value: {free_c.target_url}**" in md
+        assert "eip155:196" in md  # the unpayable one's reason still shown
+        assert "No candidate is payable" not in md  # not all are unpayable

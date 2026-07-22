@@ -70,10 +70,13 @@ class Candidate:
     challenge_outcome: str | None = None
     network: str | None = None  # raw network string from the parsed challenge, if any
     asset: str | None = None  # asset address from the parsed challenge, if any
+    # True when the target answered directly with no 402 at all — a genuinely
+    # free service, first-class and scorable (price 0), never a failure.
+    free: bool = False
 
     @property
     def usable(self) -> bool:
-        return self.reachable and self.purchased and (self.delivered_chars or 0) > 0
+        return self.reachable and (self.purchased or self.free) and (self.delivered_chars or 0) > 0
 
 
 @dataclass
@@ -102,14 +105,16 @@ class Comparison:
 def _extract(report: Report) -> dict[str, Any]:
     """Pull the comparable metrics out of a single-target report."""
     by_id = {r.id: r for r in report.results}
-    price = None
-    if (c5 := by_id.get("C5")) and c5.evidence.get("quoted_usdt") is not None:
-        price = float(c5.evidence["quoted_usdt"])
-    elif (c4 := by_id.get("C4")) and c4.evidence.get("amount_units"):
-        try:
-            price = int(c4.evidence["amount_units"]) / 1_000_000
-        except (TypeError, ValueError):
-            price = None
+    free = bool((c4 := by_id.get("C4")) and c4.evidence.get("free") is True)
+    price = 0.0 if free else None
+    if not free:
+        if (c5 := by_id.get("C5")) and c5.evidence.get("quoted_usdt") is not None:
+            price = float(c5.evidence["quoted_usdt"])
+        elif (c4 := by_id.get("C4")) and c4.evidence.get("amount_units"):
+            try:
+                price = int(c4.evidence["amount_units"]) / 1_000_000
+            except (TypeError, ValueError):
+                price = None
     latency = None
     if (c6 := by_id.get("C6")) and c6.status == Status.PASS and c6.duration_ms:
         latency = int(c6.duration_ms)  # real paid-delivery latency — what a buyer feels
@@ -120,15 +125,18 @@ def _extract(report: Report) -> dict[str, Any]:
     delivered = None
     if (c7 := by_id.get("C7")) and c7.evidence.get("delivered_chars") is not None:
         delivered = int(c7.evidence["delivered_chars"])
+    elif free and (c4 := by_id.get("C4")) and c4.evidence.get("delivered_chars") is not None:
+        delivered = int(c4.evidence["delivered_chars"])
     purchased = by_id.get("C6", None) is not None and by_id["C6"].status == Status.PASS
     reachable = by_id.get("C1", None) is not None and by_id["C1"].status == Status.PASS
     # the real reason C6 didn't PASS (facilitator rejection, crash, skip, ...) —
     # surfaced verbatim so bench doesn't collapse it into a generic note
     purchase_error = None
-    if not purchased and (c6 := by_id.get("C6")) is not None:
+    if not purchased and not free and (c6 := by_id.get("C6")) is not None:
         purchase_error = c6.summary
     return {"price": price, "latency": latency, "delivered": delivered,
-            "purchased": purchased, "reachable": reachable, "purchase_error": purchase_error}
+            "purchased": purchased, "reachable": reachable, "purchase_error": purchase_error,
+            "free": free}
 
 
 def _rank(candidates: list[Candidate]) -> None:
@@ -216,7 +224,11 @@ def _assign_verdicts(usable: list["Candidate"]) -> None:
         if c is winner:
             continue
         bits = []
-        if c.price_usdt and winner.price_usdt and c.price_usdt > winner.price_usdt:
+        # Explicit None-checks, not truthiness — a free candidate's price_usdt
+        # is 0.0, a meaningful value that a bare `if c.price_usdt` would treat
+        # the same as "no price known" and silently skip.
+        if (c.price_usdt is not None and winner.price_usdt is not None
+                and c.price_usdt > winner.price_usdt):
             bits.append(f"costs {_pct(c.price_usdt, winner.price_usdt)}")
         if c.latency_ms and winner.latency_ms and c.latency_ms > winner.latency_ms * 1.15:
             bits.append(f"{_pct(c.latency_ms, winner.latency_ms)} latency")
@@ -225,7 +237,8 @@ def _assign_verdicts(usable: list["Candidate"]) -> None:
             gain = f"delivers {_pct(c.delivered_chars, winner.delivered_chars)} data but "
         if bits:
             c.verdict = (gain + " and ".join(bits) + " than the winner").capitalize()
-        elif c.price_usdt and winner.price_usdt and c.price_usdt < winner.price_usdt:
+        elif (c.price_usdt is not None and winner.price_usdt is not None
+              and c.price_usdt < winner.price_usdt):
             c.verdict = "Cheaper, but thinner delivery drags its value down"
         else:
             c.verdict = "Edged out on the overall balance"
@@ -257,6 +270,7 @@ class _HttpProbeOutcome:
     challenge_outcome: str | None  # "unparseable" | "unsupported_network" | "payable" | None
     network: str | None = None
     asset: str | None = None
+    free: bool = False
 
 
 async def _probe_http_resource(url: str, http: httpx.AsyncClient, payer: Payer) -> _HttpProbeOutcome:
@@ -276,9 +290,11 @@ async def _probe_http_resource(url: str, http: httpx.AsyncClient, payer: Payer) 
     resp = fetched.response
 
     if resp.status_code == 200:
-        return _HttpProbeOutcome(True, False, None, first_ms, None, None,
-                                 "this service appears to be free — no payment required "
-                                 f"(unpaid {fetched.verb} call returned 200)", None)
+        delivered_chars = len(resp.content)
+        return _HttpProbeOutcome(True, False, 0.0, first_ms, delivered_chars, None,
+                                 "free — no payment required "
+                                 f"(unpaid {fetched.verb} call returned 200)", None,
+                                 free=True)
     if resp.status_code != 402:
         return _HttpProbeOutcome(False, False, None, None, None, None,
                                  f"unreachable: unpaid {fetched.verb} call returned "
@@ -477,15 +493,18 @@ async def compare_services(
         notes = []
         if not m["reachable"]:
             notes.append("unreachable")
-        if not m["purchased"]:
+        elif m["free"]:
+            notes.append("free — no payment required")
+        elif not m["purchased"]:
             notes.append(m["purchase_error"] or "purchase failed or skipped")
-        if m["delivered"] is not None and m["delivered"] == 0:
+        if not m["free"] and m["delivered"] is not None and m["delivered"] == 0:
             notes.append("paid but empty")
         return Candidate(
             target_url=url, reachable=m["reachable"], purchased=m["purchased"],
             price_usdt=m["price"], latency_ms=m["latency"],
             delivered_chars=m["delivered"], tx_ref=(report.tx_refs[0] if report.tx_refs else None),
             report_id=report.id, notes=notes, wake_ms=wake_ms, woke=woke, shape="mcp",
+            free=m["free"],
         )
 
     async def probe_http(url: str, http: httpx.AsyncClient) -> Candidate:
@@ -498,7 +517,7 @@ async def compare_services(
             report_id="", notes=[outcome.note] if outcome.note else [],
             wake_ms=wake_ms, woke=woke, shape="http",
             challenge_outcome=outcome.challenge_outcome,
-            network=outcome.network, asset=outcome.asset,
+            network=outcome.network, asset=outcome.asset, free=outcome.free,
         )
 
     async def _probe_all(http: httpx.AsyncClient | None) -> list[Candidate]:
@@ -566,8 +585,15 @@ def comparison_markdown(comp: Comparison, base_url: str) -> str:
         and all(c.challenge_outcome == "unsupported_network" for c in comp.candidates)
     )
 
+    all_free = bool(comp.candidates) and all(c.free for c in comp.candidates)
+
     if comp.winner_url:
         lines.append(f"**Best value: {comp.winner_url}**\n")
+        if all_free:
+            lines.append(
+                "_All candidates are free — no payment required anywhere. Ranking was "
+                "decided on latency and delivery completeness only._\n"
+            )
     elif all_unpayable:
         named = "; ".join(
             f"{c.target_url} — {c.network}" + (f" (asset {c.asset})" if c.asset else "")
@@ -592,7 +618,10 @@ def comparison_markdown(comp: Comparison, base_url: str) -> str:
         lat = f"{c.latency_ms}ms" if c.latency_ms is not None else "—"
         deliv = f"{c.delivered_chars}c" if c.delivered_chars is not None else "—"
         wake = "—" if c.wake_ms is None else f"{c.wake_ms}ms" + (" (cold)" if c.woke else "")
-        status = "✅ usable" if c.usable else ("⚠️ " + ", ".join(c.notes) if c.notes else "—")
+        if c.usable:
+            status = "✅ free" if c.free else "✅ usable"
+        else:
+            status = "⚠️ " + ", ".join(c.notes) if c.notes else "—"
         score = f"{c.value_score}" if c.usable else "—"
         lines.append(f"| {c.target_url} | {shape} | {score} | {price} | {lat} | "
                      f"{deliv} | {wake} | {status} |")

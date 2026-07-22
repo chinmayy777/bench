@@ -128,9 +128,10 @@ def test_all_targets_dead_reports_unreachable(monkeypatch):
 
 def test_free_target_reported_as_free_not_broken(server_factory):
     """One target genuinely paywalls market_pulse; the other answers it
-    directly with 200 (no 402) — a free service, not a broken one. The two
-    must read differently in the report, and C5/C6 must not print the generic
-    hardcoded 'no challenge captured in C4' line."""
+    directly with 200 (no 402) — a free service, first-class and scored (price
+    0), never excluded as a failure. The two must read differently in the
+    report, and C5/C6 must not print the generic hardcoded 'no challenge
+    captured in C4' line."""
     with server_factory(vendor(price=0.05, latency_ms=10, richness=1), 8885), \
          server_factory(_stub_app(["ping", "market_pulse"]), 8886):
         comp = asyncio.run(compare_services(
@@ -146,13 +147,19 @@ def test_free_target_reported_as_free_not_broken(server_factory):
     free = [c for c in comp.candidates if "8886" in c.target_url][0]
 
     assert paid.usable
-    assert not free.usable
-    assert any("appears to be free" in n for n in free.notes)
+    assert not paid.free
+    assert free.usable  # free is first-class, not excluded
+    assert free.free is True
+    assert free.purchased is False  # first-class, but no real payment happened
+    assert free.price_usdt == 0.0
+    assert free.delivered_chars is not None and free.delivered_chars > 0
+    assert any("free — no payment required" in n for n in free.notes)
     assert not any("no challenge captured in C4" in n for n in free.notes)
 
     by_id = {r.id: r for r in report.results}
     assert by_id["C4"].status == Status.WARN
     assert "this service appears to be free — no payment required" in by_id["C4"].summary
+    assert by_id["C4"].evidence.get("free") is True
     assert by_id["C5"].status == Status.SKIP
     assert "appears to be free" in by_id["C5"].summary
     assert by_id["C6"].status == Status.SKIP

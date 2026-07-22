@@ -36,6 +36,9 @@
     <span class="lbl">Best value</span>
     <span class="who">{{ c.winner_url }}</span>
   </div>
+  {% if c.candidates and c.candidates | selectattr('free') | list | length == c.candidates | length %}
+  <div class="inferred-note">All candidates are free — no payment required anywhere. Ranking was decided on latency and delivery completeness only.</div>
+  {% endif %}
   {% elif c.candidates and c.candidates | selectattr('challenge_outcome', 'equalto', 'unsupported_network') | list | length == c.candidates | length %}
   <div class="verdict none">
     <span class="lbl">Result</span>
@@ -84,7 +87,7 @@
       <div class="rank">{{ loop.index }}{% if cand.target_url == c.winner_url %}<span class="crown">BEST</span>{% endif %}</div>
 
       <div class="svc">
-        <div class="name">{{ cand.target_url }} <span class="toolnote">{{ 'MCP' if cand.shape == 'mcp' else 'HTTP' }}</span></div>
+        <div class="name">{{ cand.target_url }} <span class="toolnote">{{ 'MCP' if cand.shape == 'mcp' else 'HTTP' }}</span>{% if cand.free %} <span class="toolnote">FREE</span>{% endif %}</div>
         {% if cand.wake_ms is not none %}
         <div class="wake">woke in {{ cand.wake_ms }}ms{% if cand.woke %} <span class="coldtag">cold start — excluded from latency</span>{% endif %}</div>
         {% endif %}

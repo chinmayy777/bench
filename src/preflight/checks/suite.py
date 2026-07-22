@@ -107,7 +107,22 @@ async def _c4(ctx: RunContext) -> CheckResult:
 
     # case (c): the tool answered without demanding payment at all — likely free,
     # not broken. Distinguish this from a genuinely dead/misconfigured target.
+    # Measure what it actually delivered so a free service can be scored as a
+    # first-class candidate (bench.py reads ev["free"]/ev["delivered_chars"]),
+    # not just flagged and set aside.
     if resp.status_code == 200:
+        if ctx.paid_tool:
+            from . import parse_rpc_response
+            data = parse_rpc_response(resp)
+            texts = []
+            if data is not None:
+                content = (data.get("result") or {}).get("content") or []
+                texts = [c.get("text", "") for c in content if isinstance(c, dict)]
+            delivered_chars = sum(len(t) for t in texts) if texts else 0
+        else:
+            delivered_chars = len(resp.content)
+        ev["free"] = True
+        ev["delivered_chars"] = delivered_chars
         return _done(
             Status.WARN,
             "this service appears to be free — no payment required "
