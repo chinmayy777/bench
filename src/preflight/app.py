@@ -107,16 +107,105 @@ async def lifespan(app):
 
 
 app = FastAPI(title="Tender", lifespan=lifespan)
+
+
+async def _tool_schemas() -> list[dict]:
+    """The live tool list/schemas, straight from the same FastMCP registry the
+    real MCP transport serves — one source of truth, no hand-duplicated copy
+    to drift out of sync."""
+    tools = await mcp.list_tools()
+    return [{"name": t.name, "description": t.description, "inputSchema": t.parameters}
+            for t in tools]
+
+
+async def _discovery_doc() -> dict:
+    """Machine-readable answer to "how do I call Tender": buyer-side, free,
+    POST-JSON-RPC-MCP — served at /.well-known/mcp.json, /.well-known/agent.json,
+    and /about, so reviewers stop guessing (probing dead discovery paths,
+    sending empty args, or treating it as a paid seller expecting a 402)."""
+    return {
+        "name": "Tender",
+        "role": "buyer",
+        "pricing": {
+            "model": "free",
+            "amount_usdt": 0,
+            "note": "Tender charges nothing to call. It never issues its own x402 "
+                    "challenge — it is the one paying OTHER ASPs' 402s on the "
+                    "caller's behalf, not a paid seller.",
+        },
+        "summary": "Tender is a free, buyer-side x402 comparison agent. Give it "
+                   "several ASP endpoints that do the same job; it pays their "
+                   "real x402 challenges, measures price, latency, and delivery, "
+                   "and returns a ranked scorecard naming the best value. It does "
+                   "not sell a paid service and does not return its own 402.",
+        "protocol": {
+            "type": "mcp",
+            "transport": "streamable-http",
+            "endpoint": f"{settings.base_url}/mcp/",
+            "method": "POST",
+            "content_type": "application/json",
+            "framing": "JSON-RPC 2.0",
+            "example": {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        },
+        "tools": await _tool_schemas(),
+        "links": {
+            "about": f"{settings.base_url}/about",
+            "discovery_mcp": f"{settings.base_url}/.well-known/mcp.json",
+            "discovery_agent": f"{settings.base_url}/.well-known/agent.json",
+            "healthz": f"{settings.base_url}/healthz",
+            "landing": f"{settings.base_url}/",
+        },
+    }
+
+
+@app.get("/mcp/")
+async def mcp_get_hint() -> JSONResponse:
+    """A bare GET here used to 404/405 with no explanation, which is exactly
+    what got Tender probed wrong. Registered ahead of the /mcp mount below so
+    it wins for GET specifically; POST (and every other method) still falls
+    through to the mounted MCP transport, unchanged."""
+    return JSONResponse(status_code=405, content={
+        "error": "method_not_allowed",
+        "message": "This is an MCP streamable-HTTP endpoint — it only accepts "
+                   "POST requests with a JSON-RPC 2.0 envelope, not GET.",
+        "example": f'curl -X POST {settings.base_url}/mcp/ '
+                   '-H "Content-Type: application/json" '
+                   '-d \'{"jsonrpc":"2.0","id":1,"method":"tools/list"}\'',
+        "discovery": f"{settings.base_url}/.well-known/mcp.json",
+    })
+
+
 app.mount("/mcp", mcp_app)
 app.mount("/static", StaticFiles(directory=_HERE / "static"), name="static")
 
 
-@app.api_route("/healthz", methods=["GET", "HEAD"])
-async def healthz(request: Request) -> JSONResponse:
+@app.get("/.well-known/mcp.json")
+async def well_known_mcp() -> JSONResponse:
+    return JSONResponse(await _discovery_doc())
+
+
+@app.get("/.well-known/agent.json")
+async def well_known_agent() -> JSONResponse:
+    return JSONResponse(await _discovery_doc())
+
+
+@app.get("/about")
+async def about() -> JSONResponse:
+    return JSONResponse(await _discovery_doc())
+
+
+async def _healthz(request: Request) -> JSONResponse:
     resp = JSONResponse({"ok": True, "payer_mode": settings.payer_mode})
     if request.method == "HEAD":
         resp.body = b""  # same status/headers as GET, no body, per HTTP spec
     return resp
+
+
+# Registered as two routes (not one api_route(methods=["GET","HEAD"])) with
+# distinct operation_ids — sharing one auto-generated id across two methods
+# on the same path is what FastAPI was warning about at startup.
+app.add_api_route("/healthz", _healthz, methods=["GET"], operation_id="healthz_get")
+app.add_api_route("/healthz", _healthz, methods=["HEAD"], operation_id="healthz_head")
 
 
 @app.post("/api/run")
