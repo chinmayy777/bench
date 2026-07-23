@@ -175,7 +175,43 @@ async def mcp_get_hint() -> JSONResponse:
     })
 
 
-app.mount("/mcp", mcp_app)
+class _MCPAcceptHeaderShim:
+    """FastMCP's underlying streamable-HTTP transport (mcp.server.streamable_http)
+    406s any POST whose Accept header doesn't already contain "application/json"
+    — even though it would otherwise answer with a perfectly normal JSON-RPC
+    result. There is no FastMCP/http_app() config flag to relax this (checked:
+    it's hardcoded in _validate_accept_header, several layers below FastMCP).
+
+    A known-working free ASP on the marketplace (ScoutGate) tolerates a
+    missing Accept header entirely and just answers — naive probers that
+    don't set MCP's exact header were getting a 406 from Tender instead of
+    the same clean 200. Widen the header before it reaches the transport,
+    but only when it wouldn't already satisfy the check, so callers that
+    already negotiate correctly — including real Accept: text/event-stream
+    clients doing SSE streaming — see no change at all."""
+
+    _CANONICAL_ACCEPT = b"application/json, text/event-stream"
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] == "POST":
+            headers = list(scope.get("headers", []))
+            accept = next((v for k, v in headers if k.lower() == b"accept"), b"")
+            if not self._accepts_json(accept):
+                headers = [(k, v) for k, v in headers if k.lower() != b"accept"]
+                headers.append((b"accept", self._CANONICAL_ACCEPT))
+                scope = {**scope, "headers": headers}
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    def _accepts_json(accept_header: bytes) -> bool:
+        types = [t.strip() for t in accept_header.decode("latin-1").split(",")]
+        return any(t.startswith("application/json") for t in types)
+
+
+app.mount("/mcp", _MCPAcceptHeaderShim(mcp_app))
 app.mount("/static", StaticFiles(directory=_HERE / "static"), name="static")
 
 

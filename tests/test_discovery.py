@@ -106,6 +106,41 @@ def test_post_mcp_still_works_unchanged():
     assert names == REAL_TOOL_NAMES
 
 
+def test_post_mcp_with_no_accept_header_still_succeeds():
+    """FastMCP's underlying transport 406s a POST with no Accept header at
+    all (Client must accept application/json) — the shim ahead of the /mcp
+    mount must widen it before the transport ever sees the request, exactly
+    like the working free ASP (ScoutGate) tolerates the same omission."""
+    with TestClient(app) as lifespan_client:
+        resp = lifespan_client.post(
+            "/mcp/",
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            # deliberately no Accept header — httpx/TestClient won't add one
+            headers={"accept": ""},
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    names = {t["name"] for t in data["result"]["tools"]}
+    assert names == REAL_TOOL_NAMES
+
+
+def test_post_mcp_with_json_only_accept_header_still_works():
+    """Accept: application/json (no text/event-stream) must also succeed —
+    Tender's transport runs in JSON-only mode (json_response=True), which
+    only ever required application/json in the first place; the shim must
+    not interfere with an Accept header that already satisfies the check."""
+    with TestClient(app) as lifespan_client:
+        resp = lifespan_client.post(
+            "/mcp/",
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            headers={"accept": "application/json"},
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    names = {t["name"] for t in data["result"]["tools"]}
+    assert names == REAL_TOOL_NAMES
+
+
 def test_healthz_get_and_head_both_work():
     get_resp = client.get("/healthz")
     assert get_resp.status_code == 200
