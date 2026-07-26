@@ -86,11 +86,32 @@ def test_discovery_tool_schemas_match_real_mcp_tools_list():
         assert doc_by_name[t.name]["inputSchema"] == t.parameters
 
 
-def test_get_mcp_returns_helpful_405_not_bare():
+def test_get_mcp_returns_402_not_bare():
+    """The x402 validator probes with a bare GET and rejects any ASP that
+    doesn't 402 on it (TRACE, the working reference, gates GET too) — so an
+    unpaid GET must get the same challenge as an unpaid POST, not a 405."""
     resp = client.get("/mcp/")
-    assert resp.status_code == 405
+    assert resp.status_code == 402
+    header = resp.headers.get("payment-required")
+    assert header
+    req = decode_payment_required_header(header).accepts[0]
+    assert req.amount == "0"
+    assert req.scheme == "exact"
+    assert req.network == "eip155:196"
+
+
+def test_paid_get_acknowledges_settlement_with_a_helpful_hint():
+    """A GET carries no JSON-RPC body/method, so there's no tool call to
+    fulfill once payment clears — but it must still be a 200 (the signed-
+    replay flow applies to GET too), with the same practical guidance the
+    old bare-405 hint used to give."""
+    unpaid = client.get("/mcp/")
+    assert unpaid.status_code == 402
+    signature = _paid_signature_header(unpaid)
+    resp = client.get("/mcp/", headers={"PAYMENT-SIGNATURE": signature})
+    assert resp.status_code == 200
     body = resp.json()
-    assert "JSON-RPC" in body["message"]
+    assert body["ok"] is True
     assert "POST" in body["message"]
     assert body["example"].startswith("curl -X POST")
     assert "tools/list" in body["example"]

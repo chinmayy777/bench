@@ -205,3 +205,42 @@ class TestMcpEndpointHandshake:
         settle_header = paid.headers.get("payment-response")
         assert settle_header
         assert decode_payment_response_header(settle_header).success
+
+    def test_bare_get_also_gets_the_402_challenge(self, server_factory):
+        """The marketplace's x402 validator probes with a bare GET, not just
+        POST, and rejects any ASP that doesn't 402 on it — TRACE (#7515) gates
+        every verb, so Tender's gate must too, not just the JSON-RPC POST path."""
+        from preflight.app import app
+
+        with server_factory(app, 8993):
+            resp = httpx.get("http://127.0.0.1:8993/mcp/", timeout=15.0)
+        assert resp.status_code == 402
+        header = resp.headers.get("payment-required")
+        assert header
+        req = decode_payment_required_header(header).accepts[0]
+        assert req.amount == "0"
+        assert req.scheme == "exact"
+        assert req.network == NETWORK
+        assert req.pay_to == PAY_TO
+
+    def test_signed_get_replay_is_accepted(self, server_factory):
+        """GET carries no JSON-RPC body/method to fulfill, but the
+        signed-replay -> 200 flow still has to hold for GET, same as POST:
+        once payment verifies, the call succeeds instead of erroring out."""
+        from preflight.app import app
+
+        with server_factory(app, 8994):
+            unpaid = httpx.get("http://127.0.0.1:8994/mcp/", timeout=15.0)
+            assert unpaid.status_code == 402
+            req = decode_payment_required_header(unpaid.headers["payment-required"]).accepts[0]
+
+            payload = _sign(req)
+            paid = httpx.get(
+                "http://127.0.0.1:8994/mcp/", timeout=15.0,
+                headers={"PAYMENT-SIGNATURE": encode_payment_signature_header(payload)},
+            )
+        assert paid.status_code == 200
+        assert paid.json()["ok"] is True
+        settle_header = paid.headers.get("payment-response")
+        assert settle_header
+        assert decode_payment_response_header(settle_header).success

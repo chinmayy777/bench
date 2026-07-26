@@ -129,10 +129,12 @@ app = FastAPI(title="Tender", lifespan=lifespan)
 _x402_server = x402ResourceServer(LocalZeroFeeFacilitator(network=TENDER_NETWORK))
 register_exact_evm_server(_x402_server, networks=TENDER_NETWORK)
 _x402_routes = {
-    # POST only — GET /mcp/ is just the plain-language hint route below
-    # (mcp_get_hint), never a real MCP/JSON-RPC call, and shouldn't be
-    # payment-gated.
-    "POST /mcp*": RouteConfig(
+    # Every verb, not just POST — the marketplace's x402 validator probes
+    # with a bare GET and rejects any endpoint that doesn't 402 on it (TRACE,
+    # the working reference, gates GET too). See mcp_get_hint() below for
+    # what a *paid* GET gets back, since GET carries no JSON-RPC call to
+    # actually fulfill.
+    "/mcp*": RouteConfig(
         accepts=[PaymentOption(
             scheme="exact",
             network=TENDER_NETWORK,
@@ -204,14 +206,19 @@ async def _discovery_doc() -> dict:
 
 @app.get("/mcp/")
 async def mcp_get_hint() -> JSONResponse:
-    """A bare GET here used to 404/405 with no explanation, which is exactly
-    what got Tender probed wrong. Registered ahead of the /mcp mount below so
-    it wins for GET specifically; POST (and every other method) still falls
-    through to the mounted MCP transport, unchanged."""
-    return JSONResponse(status_code=405, content={
-        "error": "method_not_allowed",
-        "message": "This is an MCP streamable-HTTP endpoint — it only accepts "
-                   "POST requests with a JSON-RPC 2.0 envelope, not GET.",
+    """Reached ONLY by a GET whose x402 payment has already been verified —
+    every unpaid GET to /mcp/ is intercepted by the payment middleware above
+    and answered with the 402 challenge before Starlette routing ever runs
+    (the gate covers every verb now, not just POST, matching TRACE). A GET
+    carries no JSON-RPC body/method, so there is no tool call to fulfill
+    here; this just acknowledges the (zero-cost) settlement and points paid
+    callers at the real call shape. Registered ahead of the /mcp mount so it
+    wins for GET specifically; POST still falls through to the mounted MCP
+    transport, unchanged."""
+    return JSONResponse(status_code=200, content={
+        "ok": True,
+        "message": "Payment verified. GET carries no JSON-RPC request to "
+                   "fulfill — use POST for tool calls.",
         "example": f'curl -X POST {settings.base_url}/mcp/ '
                    '-H "Content-Type: application/json" '
                    '-d \'{"jsonrpc":"2.0","id":1,"method":"tools/list"}\'',
