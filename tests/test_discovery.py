@@ -6,10 +6,19 @@ import warnings
 
 import pytest
 from fastapi.testclient import TestClient
+from x402.http.utils import decode_payment_required_header, encode_payment_signature_header
 
 from preflight.app import app
+from test_x402_seller import _sign
 
 client = TestClient(app)
+
+
+def _paid_signature_header(unpaid_resp):
+    """Sign a valid zero-value authorization against the 402 this app just
+    issued, so POST tests can drive the real gated /mcp/ past it."""
+    req = decode_payment_required_header(unpaid_resp.headers["payment-required"]).accepts[0]
+    return encode_payment_signature_header(_sign(req))
 
 REAL_TOOL_NAMES = {"preflight_run", "get_report", "compare_services"}
 
@@ -19,7 +28,7 @@ def _assert_discovery_shape(doc: dict) -> None:
     assert doc["role"] == "buyer"
     assert doc["pricing"]["model"] == "free"
     assert doc["pricing"]["amount_usdt"] == 0
-    assert "402" in doc["pricing"]["note"]  # explicitly says it doesn't issue one
+    assert "402" in doc["pricing"]["note"]  # explains its 402 always quotes amount 0
     assert "free" in doc["summary"].lower()
     assert "buyer" in doc["summary"].lower() or "pays" in doc["summary"].lower()
     assert "does not sell" in doc["summary"] or "not a paid" in doc["pricing"]["note"]
@@ -90,16 +99,18 @@ def test_get_mcp_returns_helpful_405_not_bare():
 
 def test_post_mcp_still_works_unchanged():
     """The new GET /mcp/ route must not shadow POST — the real MCP transport
-    still answers tools/list exactly as before. Needs the lifespan-managed
+    still answers tools/list exactly as before, once the (now mandatory,
+    zero-amount) x402 handshake is satisfied. Needs the lifespan-managed
     client (FastMCP's session manager only initializes its task group on
     ASGI startup) — the bare module-level client skips that on purpose for
     the other tests here, which never touch the MCP transport itself."""
+    headers = {"accept": "application/json, text/event-stream"}
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
     with TestClient(app) as lifespan_client:
-        resp = lifespan_client.post(
-            "/mcp/",
-            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
-            headers={"accept": "application/json, text/event-stream"},
-        )
+        unpaid = lifespan_client.post("/mcp/", json=body, headers=headers)
+        assert unpaid.status_code == 402
+        headers = {**headers, "PAYMENT-SIGNATURE": _paid_signature_header(unpaid)}
+        resp = lifespan_client.post("/mcp/", json=body, headers=headers)
     assert resp.status_code == 200
     data = resp.json()
     names = {t["name"] for t in data["result"]["tools"]}
@@ -110,14 +121,15 @@ def test_post_mcp_with_no_accept_header_still_succeeds():
     """FastMCP's underlying transport 406s a POST with no Accept header at
     all (Client must accept application/json) — the shim ahead of the /mcp
     mount must widen it before the transport ever sees the request, exactly
-    like the working free ASP (ScoutGate) tolerates the same omission."""
+    like the working free ASP (ScoutGate) tolerates the same omission. The
+    x402 gate sits in front of that shim and must not interfere with it."""
+    headers = {"accept": ""}  # deliberately no Accept header
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
     with TestClient(app) as lifespan_client:
-        resp = lifespan_client.post(
-            "/mcp/",
-            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
-            # deliberately no Accept header — httpx/TestClient won't add one
-            headers={"accept": ""},
-        )
+        unpaid = lifespan_client.post("/mcp/", json=body, headers=headers)
+        assert unpaid.status_code == 402
+        headers = {**headers, "PAYMENT-SIGNATURE": _paid_signature_header(unpaid)}
+        resp = lifespan_client.post("/mcp/", json=body, headers=headers)
     assert resp.status_code == 200
     data = resp.json()
     names = {t["name"] for t in data["result"]["tools"]}
@@ -128,13 +140,15 @@ def test_post_mcp_with_json_only_accept_header_still_works():
     """Accept: application/json (no text/event-stream) must also succeed —
     Tender's transport runs in JSON-only mode (json_response=True), which
     only ever required application/json in the first place; the shim must
-    not interfere with an Accept header that already satisfies the check."""
+    not interfere with an Accept header that already satisfies the check,
+    and neither must the x402 gate in front of it."""
+    headers = {"accept": "application/json"}
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
     with TestClient(app) as lifespan_client:
-        resp = lifespan_client.post(
-            "/mcp/",
-            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
-            headers={"accept": "application/json"},
-        )
+        unpaid = lifespan_client.post("/mcp/", json=body, headers=headers)
+        assert unpaid.status_code == 402
+        headers = {**headers, "PAYMENT-SIGNATURE": _paid_signature_header(unpaid)}
+        resp = lifespan_client.post("/mcp/", json=body, headers=headers)
     assert resp.status_code == 200
     data = resp.json()
     names = {t["name"] for t in data["result"]["tools"]}

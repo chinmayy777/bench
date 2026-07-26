@@ -16,11 +16,25 @@ from fastmcp import FastMCP
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pydantic import Field
 
+from x402 import x402ResourceServer
+from x402.http.middleware import PaymentMiddlewareASGI
+from x402.http.types import PaymentOption, RouteConfig
+from x402.mechanisms.evm.exact import register_exact_evm_server
+
 from .config import settings
 from .models import Status
 from .runner import run_preflight, summary_markdown
 from .ssrf import TargetRejected
 from .store import load_report
+from .x402_seller import LocalZeroFeeFacilitator
+
+# The one thing Tender itself sells (nothing, technically): a zero-amount x402
+# handshake on eip155:196 so the marketplace's validator sees a real 402
+# challenge on /mcp, matching every other listed ASP's wire behavior. See
+# x402_seller.py for why this is a local facilitator, not OKXFacilitatorClient.
+TENDER_NETWORK = "eip155:196"
+TENDER_ASSET = "0x779ded0c9e1022225f8e0630b35a9b54be713736"  # USDT on X Layer
+TENDER_PAY_TO = "0xAB213fEcccEd629E48A8a4f54C0B636B5ae01eEc"  # agent 6337's registered wallet
 
 logging.basicConfig(level=logging.INFO, format='{"t":"%(asctime)s","lvl":"%(levelname)s","msg":"%(message)s"}')
 log = logging.getLogger("preflight")
@@ -108,6 +122,32 @@ async def lifespan(app):
 
 app = FastAPI(title="Tender", lifespan=lifespan)
 
+# Seller-side x402: gate the whole /mcp mount behind a zero-amount 402
+# handshake, matching how other free ASPs on the marketplace (e.g. TRACE,
+# agent #7515) answer unpaid calls. See x402_seller.py for why verify/settle
+# run against an in-process facilitator rather than OKX's hosted one.
+_x402_server = x402ResourceServer(LocalZeroFeeFacilitator(network=TENDER_NETWORK))
+register_exact_evm_server(_x402_server, networks=TENDER_NETWORK)
+_x402_routes = {
+    # POST only — GET /mcp/ is just the plain-language hint route below
+    # (mcp_get_hint), never a real MCP/JSON-RPC call, and shouldn't be
+    # payment-gated.
+    "POST /mcp*": RouteConfig(
+        accepts=[PaymentOption(
+            scheme="exact",
+            network=TENDER_NETWORK,
+            pay_to=TENDER_PAY_TO,
+            price={"amount": "0", "asset": TENDER_ASSET,
+                   "extra": {"name": "USD₮0", "version": "1"}},
+            max_timeout_seconds=300,
+        )],
+        resource=f"{settings.base_url}/mcp/",
+        description="Tender — free value comparison for paid agent services (A2MCP)",
+        mime_type="application/json",
+    )
+}
+app.add_middleware(PaymentMiddlewareASGI, routes=_x402_routes, server=_x402_server)
+
 
 async def _tool_schemas() -> list[dict]:
     """The live tool list/schemas, straight from the same FastMCP registry the
@@ -121,23 +161,27 @@ async def _tool_schemas() -> list[dict]:
 async def _discovery_doc() -> dict:
     """Machine-readable answer to "how do I call Tender": buyer-side, free,
     POST-JSON-RPC-MCP — served at /.well-known/mcp.json, /.well-known/agent.json,
-    and /about, so reviewers stop guessing (probing dead discovery paths,
-    sending empty args, or treating it as a paid seller expecting a 402)."""
+    and /about, so reviewers stop guessing (probing dead discovery paths or
+    sending empty args)."""
     return {
         "name": "Tender",
         "role": "buyer",
         "pricing": {
             "model": "free",
             "amount_usdt": 0,
-            "note": "Tender charges nothing to call. It never issues its own x402 "
-                    "challenge — it is the one paying OTHER ASPs' 402s on the "
-                    "caller's behalf, not a paid seller.",
+            "note": "Tender charges nothing to call, but — like every other ASP "
+                    "on the marketplace — it does issue a standard x402 402 "
+                    "handshake on every /mcp call; the quoted amount is always "
+                    "0, so settlement is a no-op and the call completes at zero "
+                    "cost. Tender is also the one paying OTHER ASPs' real, "
+                    "non-zero 402s on the caller's behalf when comparing them.",
         },
         "summary": "Tender is a free, buyer-side x402 comparison agent. Give it "
                    "several ASP endpoints that do the same job; it pays their "
                    "real x402 challenges, measures price, latency, and delivery, "
-                   "and returns a ranked scorecard naming the best value. It does "
-                   "not sell a paid service and does not return its own 402.",
+                   "and returns a ranked scorecard naming the best value. Calling "
+                   "Tender itself is free — its own 402 challenge always quotes "
+                   "amount 0 — it does not sell a paid service.",
         "protocol": {
             "type": "mcp",
             "transport": "streamable-http",
