@@ -276,3 +276,59 @@ class TestFreePlusUnpayable:
         assert f"**Best value: {free_c.target_url}**" in md
         assert "eip155:196" in md  # the unpayable one's reason still shown
         assert "No candidate is payable" not in md  # not all are unpayable
+
+
+class AlwaysRejectsPaymentApp:
+    """A payable-looking ASP whose facilitator rejects every signed payment
+    with a specific `error` field — e.g. BrandCanvas/x402.6551.io on X Layer
+    returning `{"error": "insufficient_balance"}` on a validly signed
+    replay. Models the real-world gap where bench.py used to collapse this
+    into a generic "facilitator is broken" note instead of the real reason."""
+
+    def __init__(self, *, pay_to: str, error: str = "insufficient_balance"):
+        self.pay_to = pay_to
+        self.error = error
+
+    async def __call__(self, scope, receive, send):
+        if await _handle_lifespan(scope, receive, send):
+            return
+        assert scope["type"] == "http"
+        if scope.get("path", "").rstrip("/") == "/healthz":
+            await _send_json(send, 200, {"ok": True})
+            return
+        challenge = build_challenge(pay_to=self.pay_to, amount_usdt=0.05, network="mock",
+                                    resource="http://plain-x402.local/resource", description="test resource")
+        headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+        if not headers.get("x-payment"):
+            await _send_json(send, 402, challenge)
+            return
+        # Signature is never even checked — every replay is rejected the
+        # same way a real facilitator does when the payer can't cover it.
+        challenge["error"] = self.error
+        await _send_json(send, 402, challenge)
+
+
+class TestPaymentRejectedWithSpecificReason:
+    def test_real_rejection_reason_surfaces_not_generic_message(self, server_factory):
+        import asyncio
+
+        with server_factory(AlwaysRejectsPaymentApp(pay_to=PAY_TO_A, error="insufficient_balance"), 8973):
+            # compare_services needs >=2 targets; the same dead URL twice is
+            # fine here since only the per-candidate rejection note is under test.
+            comp = asyncio.run(compare_services(
+                [_urls([8973])[0], _urls([8973])[0]], task="rejected payment"))
+        c = comp.candidates[0]
+        assert c.usable is False
+        assert c.purchased is False
+        assert "insufficient_balance" in c.notes[0]
+        assert "facilitator verify/settle is broken" not in c.notes[0]
+
+    def test_missing_error_field_falls_back_to_generic_note(self, server_factory):
+        import asyncio
+
+        with server_factory(AlwaysRejectsPaymentApp(pay_to=PAY_TO_A, error=""), 8974):
+            comp = asyncio.run(compare_services(
+                [_urls([8974])[0], _urls([8974])[0]], task="rejected payment, no reason given"))
+        c = comp.candidates[0]
+        assert c.usable is False
+        assert "facilitator verify/settle is broken (no reason given)" in c.notes[0]

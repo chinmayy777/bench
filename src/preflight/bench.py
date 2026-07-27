@@ -348,10 +348,19 @@ async def _probe_http_resource(url: str, http: httpx.AsyncClient, payer: Payer) 
     tx_ref = paid_resp.headers.get(settle_header) or None
 
     if paid_resp.status_code == 402:
+        # The re-quoted 402 usually carries its OWN reason in `error` (e.g.
+        # "insufficient_balance") — surface that verbatim instead of a
+        # generic "facilitator is broken" guess. Same header-then-body
+        # convention as the original challenge.
+        reason = "facilitator verify/settle is broken (no reason given)"
+        rejection = extract_challenge_payload(paid_resp)
+        if rejection is not None:
+            err = rejection[0].get("error")
+            if err:
+                reason = str(err)
         return _HttpProbeOutcome(True, False, price_usdt, paid_ms, None, None,
-                                 "server rejected a validly signed payment (still 402) "
-                                 "— facilitator verify/settle is broken", "payable",
-                                 network=req.network, asset=req.asset)
+                                 f"server rejected a validly signed payment (still 402): {reason}",
+                                 "payable", network=req.network, asset=req.asset)
     if paid_resp.status_code != 200:
         return _HttpProbeOutcome(True, False, price_usdt, paid_ms, None, None,
                                  f"paid call returned {paid_resp.status_code}", "payable",
