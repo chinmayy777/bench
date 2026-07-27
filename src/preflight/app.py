@@ -295,6 +295,34 @@ app.add_api_route("/healthz", _healthz, methods=["GET"], operation_id="healthz_g
 app.add_api_route("/healthz", _healthz, methods=["HEAD"], operation_id="healthz_head")
 
 
+@app.get("/debug/xlayer-config")
+async def debug_xlayer_config() -> JSONResponse:
+    """TEMPORARY diagnostic — reports the deployed process's actual X Layer
+    gate state (never the private key itself) so a "why didn't it spend"
+    question can be answered from real runtime values instead of code
+    defaults or inference from a comparison's error text. Remove once the
+    live gate/key/cap question is resolved — this has no reason to stay in
+    production long-term."""
+    key = settings.xlayer_payer_private_key
+    derived_address = None
+    if key:
+        try:
+            from eth_account import Account
+            derived_address = Account.from_key(key).address
+        except Exception as e:
+            derived_address = f"<key present but invalid: {type(e).__name__}>"
+    return JSONResponse({
+        "xlayer_spending_enabled": settings.xlayer_spending_enabled,
+        "xlayer_payer_private_key_configured": bool(key),
+        "xlayer_payer_derived_address": derived_address,
+        "kill_switch": settings.kill_switch,
+        "max_xlayer_pay_per_call_usdt": settings.max_xlayer_pay_per_call_usdt,
+        "max_xlayer_pay_per_run_usdt": settings.max_xlayer_pay_per_run_usdt,
+        "max_xlayer_pay_per_day_usdt": settings.max_xlayer_pay_per_day_usdt,
+        "allowed_pay_networks": list(settings.allowed_pay_networks),
+    })
+
+
 @app.post("/api/run")
 async def api_run(request: Request) -> JSONResponse:
     body = await request.json()
