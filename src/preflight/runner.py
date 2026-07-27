@@ -16,7 +16,37 @@ from .ssrf import validate_target_url
 from .store import new_report_id, save_report
 
 log = logging.getLogger("preflight.runner")
-GATING = {"C1", "C2", "C4", "C5", "C6", "C7"}  # a FAIL here fails the run
+
+
+def _compute_overall(results: list[CheckResult]) -> str:
+    """PASS is a claim that the run actually completed and actually verified
+    what it says it did — never emit it over a check that crashed or over a
+    purchase that never happened.
+
+    1. Any check FAILing at all is disqualifying. There is no longer a
+       hard-coded gating subset (C8/C9 used to be excluded from it, so a
+       crashed latency sampler could silently sit under a green headline —
+       exactly the bug this replaces).
+    2. C4 reaching PASS means a real, payable 402 challenge existed — the
+       one thing this product claims to verify is that such a challenge gets
+       paid and delivered. If C6 (the settlement) doesn't also reach PASS —
+       whether it FAILed (already caught by rule 1) or was SKIPped (refused
+       by payer policy, a cap, missing key, etc.) — the purchase the headline
+       would be implicitly vouching for never happened.
+    A SKIP elsewhere (C2 on a non-MCP target, C5/C6 with no payable challenge
+    at all — i.e. free targets or unsupported networks) is a legitimate
+    shape/environment classification, not an incomplete run, and must not by
+    itself block PASS.
+    """
+    if any(r.status == Status.FAIL for r in results):
+        return "FAIL"
+    by_id = {r.id: r for r in results}
+    c4 = by_id.get("C4")
+    if c4 is not None and c4.status == Status.PASS:
+        c6 = by_id.get("C6")
+        if c6 is None or c6.status != Status.PASS:
+            return "FAIL"
+    return "PASS"
 
 
 async def run_preflight(target_url: str, claims: dict[str, Any] | None = None,
@@ -42,8 +72,7 @@ async def run_preflight(target_url: str, claims: dict[str, Any] | None = None,
                    res.duration_ms, res.summary)
             results.append(res)
 
-    failed_gating = [r.id for r in results if r.status == Status.FAIL and r.id in GATING]
-    overall = "FAIL" if failed_gating else "PASS"
+    overall = _compute_overall(results)
     report = Report(
         id=new_report_id(), created_at=now_iso(), target_url=target_url,
         claims=claims, results=results, overall=overall,

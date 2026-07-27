@@ -26,6 +26,9 @@ SCHEME = "exact"
 # Networks the kit knows how to sign for. "mock" is our offline network for
 # local tests and the judge-safe demo; base-sepolia is the SDK's blessed
 # testnet (free faucet USDC) for real on-chain settlement at zero cost.
+# eip155:196 (X Layer) is real mainnet money — see payer.py's Payer._pay_xlayer
+# for the opt-in flag, dedicated key, and hard caps that gate ever using it;
+# its presence here only teaches the EIP-712 signer its domain parameters.
 KNOWN_NETWORKS: dict[str, dict[str, Any]] = {
     "mock": {"chain_id": 31337, "asset": "0x" + "11" * 20, "name": "MockUSD", "version": "1"},
     "base-sepolia": {
@@ -33,6 +36,12 @@ KNOWN_NETWORKS: dict[str, dict[str, Any]] = {
         "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
         "name": "USDC",
         "version": "2",
+    },
+    "eip155:196": {
+        "chain_id": 196,
+        "asset": "0x779ded0c9e1022225f8e0630b35a9b54be713736",
+        "name": "USD₮0",
+        "version": "1",
     },
 }
 

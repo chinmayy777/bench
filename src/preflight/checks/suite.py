@@ -4,6 +4,8 @@ from __future__ import annotations
 import statistics
 import time
 
+import httpx
+
 from ..models import CheckResult, Status
 from ..payer import PayerRefused
 from ..x402_probe import (
@@ -16,7 +18,7 @@ from ..x402_probe import (
     settlement_header_name,
 )
 from ..x402kit import units_to_usdt
-from . import RunContext, call_tool_raw, excerpt, mcp_client, timed
+from . import JSONRPC_HEADERS, RunContext, call_tool_raw, excerpt, mcp_client, rpc_body, timed
 
 
 def _mk(fn, cid: str, name: str):
@@ -270,18 +272,41 @@ async def _c7(ctx: RunContext) -> CheckResult:
 
 
 async def _c8(ctx: RunContext) -> CheckResult:
+    """p50 latency over 3 samples. Every real OKX ASP gates its endpoint behind
+    an x402 402 challenge now — even a free one, at amount 0 — so a bare
+    `list_tools()` call (no payment header) 402s instead of returning, and the
+    underlying MCP client raises httpx.HTTPStatusError for it. That 402 is
+    correct, expected behavior, not a broken target, so it must not crash this
+    check. Time the 402 round-trip itself instead: it's still a real,
+    meaningful signal of the endpoint's responsiveness — a fresh signed
+    payment per sample isn't worth the extra cost/complexity just to measure
+    latency, when C6 already covers whether payment itself actually works."""
     samples: list[float] = []
-    async with mcp_client(ctx) as client:
+    gated = False
+    try:
+        async with mcp_client(ctx) as client:
+            for _ in range(3):
+                t0 = time.perf_counter()
+                await client.list_tools()
+                samples.append((time.perf_counter() - t0) * 1000)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code != 402:
+            raise
+        gated = True
+        samples = []
         for _ in range(3):
             t0 = time.perf_counter()
-            await client.list_tools()
+            await ctx.http.post(ctx.target_url, json=rpc_body("tools/list"),
+                                headers=JSONRPC_HEADERS, timeout=8.0)
             samples.append((time.perf_counter() - t0) * 1000)
+
     p50 = statistics.median(samples)
-    ev = {"samples_ms": [round(s, 1) for s in samples], "p50_ms": round(p50, 1)}
+    ev = {"samples_ms": [round(s, 1) for s in samples], "p50_ms": round(p50, 1), "gated": gated}
+    note = " (x402-gated, as expected — timed the 402 challenge round-trip)" if gated else ""
     if p50 > 5000:
         return CheckResult("C8", _c8.CHECK_NAME, Status.WARN,
-                           f"p50 latency {p50:.0f} ms is slow for agent workflows", ev)
-    return CheckResult("C8", _c8.CHECK_NAME, Status.PASS, f"p50 latency {p50:.0f} ms", ev)
+                           f"p50 latency {p50:.0f} ms is slow for agent workflows{note}", ev)
+    return CheckResult("C8", _c8.CHECK_NAME, Status.PASS, f"p50 latency {p50:.0f} ms{note}", ev)
 
 
 async def _c9(ctx: RunContext) -> CheckResult:
