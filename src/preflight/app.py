@@ -271,7 +271,54 @@ class _MCPAcceptHeaderShim:
         return any(t.startswith("application/json") for t in types)
 
 
-app.mount("/mcp", _MCPAcceptHeaderShim(mcp_app))
+class _MCPContentTypeShim:
+    """Two SEPARATE, inconsistent Content-Type checks gate a POST to the MCP
+    transport, and a caller must pass both independently:
+
+    - mcp.server.transport_security._validate_content_type: case-INsensitive
+      prefix match (`.lower().startswith("application/json")`); on failure
+      returns a bare-text `400 "Invalid Content-Type header"` — with no
+      Content-Type header at all counting as failure too.
+    - mcp.server.streamable_http._check_content_type: case-SENSITIVE exact
+      match on the part before `;` (params/charset stripped first); on
+      failure returns a JSON-wrapped `415`.
+
+    A real paid replay was observed hitting the first, bare 400, before
+    ever reaching the payment/tool logic — the same class of problem as the
+    Accept-header 406 fixed above, just a different header and a different
+    hardcoded check. Normalize Content-Type to the canonical value only
+    when the current one wouldn't already pass BOTH checks, so a caller
+    already sending 'application/json' (with or without charset/params)
+    sees no change at all."""
+
+    _CANONICAL_CONTENT_TYPE = b"application/json"
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] == "POST":
+            headers = list(scope.get("headers", []))
+            content_type = next((v for k, v in headers if k.lower() == b"content-type"), b"")
+            if not self._is_acceptable(content_type):
+                headers = [(k, v) for k, v in headers if k.lower() != b"content-type"]
+                headers.append((b"content-type", self._CANONICAL_CONTENT_TYPE))
+                scope = {**scope, "headers": headers}
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    def _is_acceptable(content_type: bytes) -> bool:
+        if not content_type:
+            return False
+        value = content_type.decode("latin-1")
+        if not value.lower().startswith("application/json"):
+            return False
+        first_part = value.split(";")[0]
+        parts = [p.strip() for p in first_part.split(",")]
+        return any(p == "application/json" for p in parts)
+
+
+app.mount("/mcp", _MCPContentTypeShim(_MCPAcceptHeaderShim(mcp_app)))
 app.mount("/static", StaticFiles(directory=_HERE / "static"), name="static")
 
 
