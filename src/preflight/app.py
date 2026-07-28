@@ -47,11 +47,14 @@ mcp = FastMCP(
     "Tender",
     instructions=(
         "Value comparison for paid agent services (A2MCP). Give Tender several "
-        "ASP endpoints that do the same job; it makes one real, settled x402 "
-        "purchase from each, measures price, latency, and delivery, and returns "
-        "a ranked scorecard naming the best value — with an on-chain transaction "
-        "as proof for every purchase. Call compare_services with the competing "
-        "endpoints. Let your agent buy the best, not the first."
+        "ASP endpoints that do the same job; it reads each one's real x402 "
+        "payment challenge — price, asset, network — measures reachability, "
+        "latency, and delivery, and returns a ranked scorecard naming the best "
+        "value using a transparent, fixed scoring formula (price, latency, "
+        "delivery). Runs cash-free by default: no purchase is settled and no "
+        "funds move — the value is the comparison and the ranking, not a "
+        "transaction. Call compare_services with the competing endpoints. Let "
+        "your agent choose the best, not the first."
     ),
 )
 
@@ -175,15 +178,21 @@ async def _discovery_doc() -> dict:
                     "on the marketplace — it does issue a standard x402 402 "
                     "handshake on every /mcp call; the quoted amount is always "
                     "0, so settlement is a no-op and the call completes at zero "
-                    "cost. Tender is also the one paying OTHER ASPs' real, "
-                    "non-zero 402s on the caller's behalf when comparing them.",
+                    "cost. Tender runs cash-free by default: when comparing "
+                    "other ASPs it reads their real x402 challenges but does "
+                    "not settle them — no funds move unless mainnet spending "
+                    "is explicitly enabled by the operator.",
         },
         "summary": "Tender is a free, buyer-side x402 comparison agent. Give it "
-                   "several ASP endpoints that do the same job; it pays their "
-                   "real x402 challenges, measures price, latency, and delivery, "
-                   "and returns a ranked scorecard naming the best value. Calling "
-                   "Tender itself is free — its own 402 challenge always quotes "
-                   "amount 0 — it does not sell a paid service.",
+                   "several ASP endpoints that do the same job; it reads each "
+                   "one's real x402 challenge — price, asset, network — "
+                   "measures reachability, latency, and delivery, and returns "
+                   "a ranked scorecard naming the best value using a "
+                   "transparent, fixed scoring formula. Cash-free by default: "
+                   "no purchase is settled, no funds move — the value is the "
+                   "comparison and the ranking, not a transaction. Calling "
+                   "Tender itself is free — its own 402 challenge always "
+                   "quotes amount 0 — it does not sell a paid service.",
         "protocol": {
             "type": "mcp",
             "transport": "streamable-http",
@@ -295,34 +304,6 @@ app.add_api_route("/healthz", _healthz, methods=["GET"], operation_id="healthz_g
 app.add_api_route("/healthz", _healthz, methods=["HEAD"], operation_id="healthz_head")
 
 
-@app.get("/debug/xlayer-config")
-async def debug_xlayer_config() -> JSONResponse:
-    """TEMPORARY diagnostic — reports the deployed process's actual X Layer
-    gate state (never the private key itself) so a "why didn't it spend"
-    question can be answered from real runtime values instead of code
-    defaults or inference from a comparison's error text. Remove once the
-    live gate/key/cap question is resolved — this has no reason to stay in
-    production long-term."""
-    key = settings.xlayer_payer_private_key
-    derived_address = None
-    if key:
-        try:
-            from eth_account import Account
-            derived_address = Account.from_key(key).address
-        except Exception as e:
-            derived_address = f"<key present but invalid: {type(e).__name__}>"
-    return JSONResponse({
-        "xlayer_spending_enabled": settings.xlayer_spending_enabled,
-        "xlayer_payer_private_key_configured": bool(key),
-        "xlayer_payer_derived_address": derived_address,
-        "kill_switch": settings.kill_switch,
-        "max_xlayer_pay_per_call_usdt": settings.max_xlayer_pay_per_call_usdt,
-        "max_xlayer_pay_per_run_usdt": settings.max_xlayer_pay_per_run_usdt,
-        "max_xlayer_pay_per_day_usdt": settings.max_xlayer_pay_per_day_usdt,
-        "allowed_pay_networks": list(settings.allowed_pay_networks),
-    })
-
-
 @app.post("/api/run")
 async def api_run(request: Request) -> JSONResponse:
     body = await request.json()
@@ -412,13 +393,8 @@ async def demo_compare(targets: str, paid_tool: str = "market_pulse",
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
     import os
-    sample_tx = os.getenv(
-        "SAMPLE_TX",
-        "0x2f0ebf349f97b134557172955907438bb0545cc755e9c7d403ec9a4d4f9453df")
     ctx = {
         "listing_url": os.getenv("LISTING_URL", "https://www.okx.ai/"),
         "sample_compare_url": os.getenv("SAMPLE_COMPARE_URL", "/compare/demo"),
-        "sample_tx_url": f"https://sepolia.basescan.org/tx/{sample_tx}",
-        "sample_tx_short": f"{sample_tx[:22]}…{sample_tx[-6:]}",
     }
     return HTMLResponse(jinja.get_template("landing.html").render(**ctx))

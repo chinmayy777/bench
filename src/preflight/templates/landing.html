@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tender — value comparison for paid agents</title>
-<meta name="description" content="Tender buys from competing agent services and ranks them by value — price, latency, delivery — with on-chain proof. Let your agent buy the best, not the first.">
+<meta name="description" content="Tender reads the real x402 challenge from competing agent services and ranks them by value — price, latency, delivery — with a transparent, fixed scoring formula. Let your agent choose the best, not the first.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -25,8 +25,8 @@
 
     <header class="hero">
       <div class="eyebrow">OKX.AI · A2MCP service</div>
-      <h1>Your agent shouldn't buy the <span class="hl">first</span> service it finds.</h1>
-      <p class="sub">Point Tender at several paid agent services that do the same job. It buys from each, measures what actually comes back, and ranks them by value — with a settled on-chain transaction as proof for every purchase.</p>
+      <h1>Your agent shouldn't pick the <span class="hl">first</span> service it finds.</h1>
+      <p class="sub">Point Tender at several paid agent services that do the same job. It reads each one's real x402 payment challenge — price, asset, network — measures reachability, latency, and delivery, and ranks them by value using a transparent, fixed formula. Cash-free by default: no purchase is settled, no funds move.</p>
       <div class="actions">
         <a class="btn btn-primary" href="{{ listing_url }}">Use on OKX.AI</a>
         {% if sample_compare_url %}<a class="btn btn-ghost" href="{{ sample_compare_url }}">See a live comparison</a>{% endif %}
@@ -73,18 +73,18 @@
         <div class="step">
           <div class="n">1</div>
           <h3>Probe each service</h3>
-          <p>Reachability, MCP handshake, and a valid x402 paywall — Tender confirms each candidate can actually be bought from before spending anything.</p>
+          <p>Reachability, MCP handshake, and a valid x402 paywall — Tender confirms each candidate is a real, live service before it's ranked.</p>
         </div>
         <div class="step">
           <div class="n">2</div>
-          <h3>Buy from every one</h3>
-          <p>Tender makes one real, settled purchase from each service and records the price paid, the response latency, and how much it actually delivered.</p>
+          <h3>Read every challenge</h3>
+          <p>Tender reads each service's real x402 payment challenge — price, asset, network — and measures response latency and delivery, without settling a purchase. Cash-free by default: no funds move.</p>
           <div class="code"><span class="fn">compare_services</span>(targets, paid_tool)</div>
         </div>
         <div class="step">
           <div class="n">3</div>
           <h3>Rank by value</h3>
-          <p>A transparent score — price 45%, latency 25%, delivery 30% — crowns the best value and explains, in plain language, why each service placed where it did.</p>
+          <p>A transparent, fixed score — price 45%, latency 25%, delivery 30% — crowns the best value and explains, in plain language, why each service placed where it did.</p>
         </div>
       </div>
     </section>
@@ -94,18 +94,10 @@
     <div class="wrap">
       <div class="proof-grid">
         <div>
-          <div class="sec-eyebrow">Provably real</div>
-          <h2 class="sec-title">Real purchases. Real receipts.</h2>
-          <p class="sec-lead">Every Tender verdict is backed by an on-chain settlement, not a simulation. A broken service that takes payment and delivers nothing is caught and excluded — it can never win on price alone.</p>
-          <p style="color:var(--text-dim);font-size:15px">Settlement runs on public infrastructure with the payer holding a bounded, capped wallet. Same inputs, same verdict, every time.</p>
-        </div>
-        <div class="txcard">
-          <div class="rowk">Settlement</div>
-          <div class="rowv ok">✓ confirmed · base-sepolia</div>
-          <div class="rowk">Transfer</div>
-          <div class="rowv">0.05 USDC · vendor-mid</div>
-          <div class="rowk">Transaction</div>
-          <div class="rowv"><a href="{{ sample_tx_url }}" target="_blank" rel="noopener">{{ sample_tx_short }}</a></div>
+          <div class="sec-eyebrow">Provably fair</div>
+          <h2 class="sec-title">Real challenges. Transparent math.</h2>
+          <p class="sec-lead">Every price Tender scores comes from the service's own live x402 challenge, not a self-reported claim. A broken service that quotes a price but can't back it with a valid challenge is caught and excluded — it can never win on price alone.</p>
+          <p style="color:var(--text-dim);font-size:15px">The scoring formula is fixed and disclosed — price 45%, latency 25%, delivery 30% — so the same inputs always produce the same verdict. Real, on-chain settlement is an opt-in operator capability, off by default; today's ranking runs entirely cash-free.</p>
         </div>
       </div>
     </div>
@@ -120,7 +112,7 @@
 
   <div class="wrap">
     <section class="final">
-      <h2>Let your agent buy the best, not the first.</h2>
+      <h2>Let your agent choose the best, not the first.</h2>
       <div class="actions">
         <a class="btn btn-primary" href="{{ listing_url }}">Use on OKX.AI</a>
         {% if sample_compare_url %}<a class="btn btn-ghost" href="{{ sample_compare_url }}">See a live comparison</a>{% endif %}
