@@ -5,6 +5,7 @@ process. Free to call — the paid tier is post-hackathon roadmap.
 """
 from __future__ import annotations
 
+import json
 import logging
 import pathlib
 from typing import Annotated
@@ -14,7 +15,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastmcp import FastMCP
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-from pydantic import Field
+from mcp.types import JSONRPCMessage
+from pydantic import Field, ValidationError
 
 from x402 import x402ResourceServer
 from x402.http.middleware import PaymentMiddlewareASGI
@@ -318,7 +320,82 @@ class _MCPContentTypeShim:
         return any(p == "application/json" for p in parts)
 
 
-app.mount("/mcp", _MCPContentTypeShim(_MCPAcceptHeaderShim(mcp_app)))
+class _MCPEmptyBodyShim:
+    """A paid replay to /mcp/ with an empty body, or a body that isn't a
+    valid JSON-RPC 2.0 message, reaches mcp.server.streamable_http.
+    _handle_post_request's `json.loads(body)` / `JSONRPCMessage.model_validate`
+    and gets a bare 400 ("Parse error" / "Validation error") — after
+    PaymentMiddlewareASGI has already verified and settled the (zero-cost)
+    payment. A real paid replay was observed doing exactly this: payment
+    went through, then the JSON-RPC body was empty or malformed, and the
+    caller got a 400 instead of anything usable — the same class of problem
+    as the Accept/Content-Type shims above, just one layer deeper (the body,
+    not the headers).
+
+    Buffer the body and run it through the exact same parse + validate the
+    transport itself uses. If it would fail, skip the mounted transport
+    entirely and answer 200 with the same discovery/usage payload served at
+    /.well-known/mcp.json — a real deliverable describing how to call the
+    one tool-calling endpoint here — instead of failing the replay. A body
+    that *does* parse as JSON-RPC (including a call to an unknown method,
+    which MCP already answers with 200 + a JSON-RPC-level error, not an
+    HTTP 400) passes through to the transport completely unchanged."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] != "POST":
+            await self.app(scope, receive, send)
+            return
+
+        body = b""
+        more_body = True
+        while more_body:
+            event = await receive()
+            body += event.get("body", b"")
+            more_body = event.get("more_body", False)
+
+        if self._is_valid_jsonrpc(body):
+            replayed = False
+
+            async def _replay_receive():
+                nonlocal replayed
+                if not replayed:
+                    replayed = True
+                    return {"type": "http.request", "body": body, "more_body": False}
+                return await receive()
+
+            await self.app(scope, _replay_receive, send)
+            return
+
+        doc = await _discovery_doc()
+        response = JSONResponse(status_code=200, content={
+            "ok": True,
+            "message": "Payment verified, but the request body was empty or "
+                       "not a valid JSON-RPC 2.0 call, so there was no tool "
+                       "call to execute. Returning usage info for the one "
+                       "tool-calling endpoint instead of failing the replay.",
+            **doc,
+        })
+        await response(scope, receive, send)
+
+    @staticmethod
+    def _is_valid_jsonrpc(body: bytes) -> bool:
+        if not body or not body.strip():
+            return False
+        try:
+            raw = json.loads(body)
+        except json.JSONDecodeError:
+            return False
+        try:
+            JSONRPCMessage.model_validate(raw)
+        except ValidationError:
+            return False
+        return True
+
+
+app.mount("/mcp", _MCPContentTypeShim(_MCPAcceptHeaderShim(_MCPEmptyBodyShim(mcp_app))))
 app.mount("/static", StaticFiles(directory=_HERE / "static"), name="static")
 
 
