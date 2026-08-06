@@ -120,13 +120,16 @@ def test_paid_get_acknowledges_settlement_with_a_helpful_hint():
 
 def test_post_mcp_still_works_unchanged():
     """The new GET /mcp/ route must not shadow POST — the real MCP transport
-    still answers tools/list exactly as before, once the (now mandatory,
-    zero-amount) x402 handshake is satisfied. Needs the lifespan-managed
-    client (FastMCP's session manager only initializes its task group on
-    ASGI startup) — the bare module-level client skips that on purpose for
-    the other tests here, which never touch the MCP transport itself."""
+    still answers a tools/call exactly as before, once the (still-mandatory,
+    zero-amount) x402 handshake is satisfied. tools/call, not tools/list —
+    _MCPHandshakeExemption made tools/list free, so it's tools/call that
+    exercises the paid round trip here. Needs the lifespan-managed client
+    (FastMCP's session manager only initializes its task group on ASGI
+    startup) — the bare module-level client skips that on purpose for the
+    other tests here, which never touch the MCP transport itself."""
     headers = {"accept": "application/json, text/event-stream"}
-    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+           "params": {"name": "get_report", "arguments": {"report_id": "nope"}}}
     with TestClient(app) as lifespan_client:
         unpaid = lifespan_client.post("/mcp/", json=body, headers=headers)
         assert unpaid.status_code == 402
@@ -134,8 +137,8 @@ def test_post_mcp_still_works_unchanged():
         resp = lifespan_client.post("/mcp/", json=body, headers=headers)
     assert resp.status_code == 200
     data = resp.json()
-    names = {t["name"] for t in data["result"]["tools"]}
-    assert names == REAL_TOOL_NAMES
+    assert data["result"]["isError"] is False
+    assert "No report with id" in data["result"]["content"][0]["text"]
 
 
 def test_post_mcp_with_no_accept_header_still_succeeds():
@@ -143,9 +146,12 @@ def test_post_mcp_with_no_accept_header_still_succeeds():
     all (Client must accept application/json) — the shim ahead of the /mcp
     mount must widen it before the transport ever sees the request, exactly
     like the working free ASP (ScoutGate) tolerates the same omission. The
-    x402 gate sits in front of that shim and must not interfere with it."""
+    x402 gate sits in front of that shim and must not interfere with it.
+    Uses tools/call (see test_post_mcp_still_works_unchanged) since
+    tools/list no longer needs payment to reach this far."""
     headers = {"accept": ""}  # deliberately no Accept header
-    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+           "params": {"name": "get_report", "arguments": {"report_id": "nope"}}}
     with TestClient(app) as lifespan_client:
         unpaid = lifespan_client.post("/mcp/", json=body, headers=headers)
         assert unpaid.status_code == 402
@@ -153,8 +159,8 @@ def test_post_mcp_with_no_accept_header_still_succeeds():
         resp = lifespan_client.post("/mcp/", json=body, headers=headers)
     assert resp.status_code == 200
     data = resp.json()
-    names = {t["name"] for t in data["result"]["tools"]}
-    assert names == REAL_TOOL_NAMES
+    assert data["result"]["isError"] is False
+    assert "No report with id" in data["result"]["content"][0]["text"]
 
 
 def test_post_mcp_with_json_only_accept_header_still_works():
@@ -162,9 +168,12 @@ def test_post_mcp_with_json_only_accept_header_still_works():
     Tender's transport runs in JSON-only mode (json_response=True), which
     only ever required application/json in the first place; the shim must
     not interfere with an Accept header that already satisfies the check,
-    and neither must the x402 gate in front of it."""
+    and neither must the x402 gate in front of it. Uses tools/call (see
+    test_post_mcp_still_works_unchanged) since tools/list no longer needs
+    payment to reach this far."""
     headers = {"accept": "application/json"}
-    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+           "params": {"name": "get_report", "arguments": {"report_id": "nope"}}}
     with TestClient(app) as lifespan_client:
         unpaid = lifespan_client.post("/mcp/", json=body, headers=headers)
         assert unpaid.status_code == 402
@@ -172,8 +181,8 @@ def test_post_mcp_with_json_only_accept_header_still_works():
         resp = lifespan_client.post("/mcp/", json=body, headers=headers)
     assert resp.status_code == 200
     data = resp.json()
-    names = {t["name"] for t in data["result"]["tools"]}
-    assert names == REAL_TOOL_NAMES
+    assert data["result"]["isError"] is False
+    assert "No report with id" in data["result"]["content"][0]["text"]
 
 
 def test_healthz_get_and_head_both_work():

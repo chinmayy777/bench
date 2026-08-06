@@ -153,7 +153,9 @@ _x402_routes = {
         mime_type="application/json",
     )
 }
-app.add_middleware(PaymentMiddlewareASGI, routes=_x402_routes, server=_x402_server)
+# PaymentMiddlewareASGI itself is registered further down (near the /mcp
+# mount, after _MCPHandshakeExemption is defined) — see the comment there
+# for why the two must be added in that specific order.
 
 
 async def _tool_schemas() -> list[dict]:
@@ -395,7 +397,98 @@ class _MCPEmptyBodyShim:
         return True
 
 
-app.mount("/mcp", _MCPContentTypeShim(_MCPAcceptHeaderShim(_MCPEmptyBodyShim(mcp_app))))
+class _MCPHandshakeExemption:
+    """Paywall only `tools/call` — MCP's own handshake/discovery methods must
+    succeed unpaywalled, or a client can never get far enough to discover
+    (let alone pay for) a real tool.
+
+    PaymentMiddlewareASGI matches purely on HTTP path ("/mcp*"); it has no
+    concept of "peek the JSON-RPC method inside the POST body." Before this,
+    the whole /mcp mount 402'd uniformly — including `initialize` itself —
+    so any real MCP-transport client died on the handshake before ever
+    reaching a paid call ("endpoint_unreachable: initialize returned HTTP
+    402"). GET is deliberately left untouched by this class (falls straight
+    through to `self.app`, i.e. PaymentMiddlewareASGI, exactly as before) —
+    it can't carry a tools/call anyway, and the marketplace's own listing
+    validator probes with a bare GET expecting a 402 on it (matching TRACE),
+    which this preserves.
+
+    Must be added via `app.add_middleware` AFTER PaymentMiddlewareASGI —
+    Starlette makes the most-recently-added middleware outermost, so adding
+    this second puts it in front, letting it inspect the JSON-RPC method and
+    decide whether to call `free_app` (bypassing payment) or fall through to
+    `self.app` (PaymentMiddlewareASGI, unchanged) before payment gating ever
+    runs. `free_app` is the same shim-wrapped transport mounted at /mcp, so
+    the Accept/Content-Type/EmptyBody shims apply identically on both the
+    free and paid path — only the payment gate itself is skipped.
+    """
+
+    FREE_METHODS = {"initialize", "notifications/initialized", "tools/list", "ping"}
+
+    def __init__(self, app, free_app):
+        self.app = app
+        self.free_app = free_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] != "POST" \
+                or not scope["path"].startswith("/mcp"):
+            await self.app(scope, receive, send)
+            return
+
+        body = b""
+        more_body = True
+        while more_body:
+            event = await receive()
+            body += event.get("body", b"")
+            more_body = event.get("more_body", False)
+
+        replayed = False
+
+        async def _replay_receive():
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return await receive()
+
+        if self._jsonrpc_method(body) in self.FREE_METHODS:
+            await self.free_app(self._strip_mount_prefix(scope), _replay_receive, send)
+            return
+
+        await self.app(scope, _replay_receive, send)
+
+    @staticmethod
+    def _jsonrpc_method(body: bytes) -> str | None:
+        if not body or not body.strip():
+            return None
+        try:
+            raw = json.loads(body)
+        except json.JSONDecodeError:
+            return None
+        method = raw.get("method") if isinstance(raw, dict) else None
+        return method if isinstance(method, str) else None
+
+    @staticmethod
+    def _strip_mount_prefix(scope: dict) -> dict:
+        """Mirror Starlette's own Mount path-stripping for "/mcp" — free_app
+        is the same object mounted at /mcp (path="/"), so it expects a scope
+        already relative to that prefix, exactly as `app.mount()` would hand
+        it when reached through normal routing."""
+        prefix = "/mcp"
+        remaining = scope["path"][len(prefix):] or "/"
+        if not remaining.startswith("/"):
+            remaining = "/" + remaining
+        return {**scope, "path": remaining, "root_path": scope.get("root_path", "") + prefix}
+
+
+_mcp_transport = _MCPContentTypeShim(_MCPAcceptHeaderShim(_MCPEmptyBodyShim(mcp_app)))
+# Order matters: PaymentMiddlewareASGI added first (inner), the handshake
+# exemption added second so Starlette makes it outermost — it must see the
+# request before PaymentMiddlewareASGI does, to route free JSON-RPC methods
+# around the payment gate entirely. See _MCPHandshakeExemption's docstring.
+app.add_middleware(PaymentMiddlewareASGI, routes=_x402_routes, server=_x402_server)
+app.add_middleware(_MCPHandshakeExemption, free_app=_mcp_transport)
+app.mount("/mcp", _mcp_transport)
 app.mount("/static", StaticFiles(directory=_HERE / "static"), name="static")
 
 

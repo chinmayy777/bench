@@ -155,6 +155,9 @@ class TestMcpEndpointHandshake:
     """Drives the real Tender app end to end over HTTP."""
 
     def test_unpaid_call_gets_a_correct_zero_amount_402(self, server_factory):
+        """Only tools/call is paywalled (initialize/tools/list/etc. are free
+        — see TestHandshakeIsFree below), so the "requires payment" example
+        here has to be an actual tool invocation, not tools/list."""
         from preflight.app import app
 
         with server_factory(app, 8991):
@@ -162,7 +165,8 @@ class TestMcpEndpointHandshake:
                 "http://127.0.0.1:8991/mcp/", timeout=15.0,
                 headers={"Content-Type": "application/json",
                         "Accept": "application/json, text/event-stream"},
-                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                     "params": {"name": "get_report", "arguments": {"report_id": "nope"}}},
             )
         assert resp.status_code == 402
         header = resp.headers.get("payment-required")
@@ -185,7 +189,8 @@ class TestMcpEndpointHandshake:
                 "http://127.0.0.1:8992/mcp/", timeout=15.0,
                 headers={"Content-Type": "application/json",
                         "Accept": "application/json, text/event-stream"},
-                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                     "params": {"name": "get_report", "arguments": {"report_id": "nope"}}},
             )
             assert unpaid.status_code == 402
             req = decode_payment_required_header(unpaid.headers["payment-required"]).accepts[0]
@@ -196,12 +201,13 @@ class TestMcpEndpointHandshake:
                 headers={"Content-Type": "application/json",
                         "Accept": "application/json, text/event-stream",
                         "PAYMENT-SIGNATURE": encode_payment_signature_header(payload)},
-                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                     "params": {"name": "get_report", "arguments": {"report_id": "nope"}}},
             )
         assert paid.status_code == 200
         body = paid.json()
-        tool_names = {t["name"] for t in body["result"]["tools"]}
-        assert {"preflight_run", "get_report", "compare_services"} <= tool_names
+        assert body["result"]["isError"] is False
+        assert "No report with id" in body["result"]["content"][0]["text"]
         settle_header = paid.headers.get("payment-response")
         assert settle_header
         assert decode_payment_response_header(settle_header).success

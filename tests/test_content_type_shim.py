@@ -6,6 +6,10 @@ around, with its own case-insensitive-prefix + missing-header failure mode.
 These tests drive the real deployed app end to end (unpaid -> 402 -> signed
 replay), varying only Content-Type, to prove the fix without touching
 anything else in the request.
+
+The trigger call is a tools/call (get_report), not tools/list -- since
+_MCPHandshakeExemption made tools/list free, only tools/call still reliably
+produces the 402 -> signed-replay round trip these tests are built around.
 """
 from __future__ import annotations
 
@@ -18,7 +22,8 @@ from preflight.app import app
 from test_x402_seller import _sign
 
 URL_TMPL = "http://127.0.0.1:{port}/mcp/"
-BODY = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+BODY = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+       "params": {"name": "get_report", "arguments": {"report_id": "nope"}}}
 
 
 def _get_challenge(port: int, unpaid_content_type: str) -> dict:
@@ -57,7 +62,7 @@ class TestPreviouslyRejectedContentTypesNowSucceed:
         with server_factory(app, 8996):
             resp = _paid_call(8996, content_type=None)
         assert resp.status_code == 200
-        assert "tools" in resp.json()["result"]
+        assert "No report with id" in resp.json()["result"]["content"][0]["text"]
 
     def test_text_json_now_returns_200(self, server_factory):
         """The exact real-world failure: bare 400 'Invalid Content-Type
@@ -65,7 +70,7 @@ class TestPreviouslyRejectedContentTypesNowSucceed:
         with server_factory(app, 8997):
             resp = _paid_call(8997, content_type="text/json")
         assert resp.status_code == 200
-        assert "tools" in resp.json()["result"]
+        assert "No report with id" in resp.json()["result"]["content"][0]["text"]
 
     def test_mixed_case_content_type_now_returns_200(self, server_factory):
         """Passes transport_security's lenient check but used to fail
@@ -73,13 +78,13 @@ class TestPreviouslyRejectedContentTypesNowSucceed:
         with server_factory(app, 8998):
             resp = _paid_call(8998, content_type="Application/JSON")
         assert resp.status_code == 200
-        assert "tools" in resp.json()["result"]
+        assert "No report with id" in resp.json()["result"]["content"][0]["text"]
 
     def test_uppercase_with_charset_now_returns_200(self, server_factory):
         with server_factory(app, 8999):
             resp = _paid_call(8999, content_type="APPLICATION/JSON; charset=utf-8")
         assert resp.status_code == 200
-        assert "tools" in resp.json()["result"]
+        assert "No report with id" in resp.json()["result"]["content"][0]["text"]
 
 
 class TestAlreadyWorkingContentTypesUnaffected:
@@ -90,16 +95,16 @@ class TestAlreadyWorkingContentTypesUnaffected:
         with server_factory(app, 9000):
             resp = _paid_call(9000, content_type="application/json")
         assert resp.status_code == 200
-        assert "tools" in resp.json()["result"]
+        assert "No report with id" in resp.json()["result"]["content"][0]["text"]
 
     def test_application_json_with_charset_unaffected(self, server_factory):
         with server_factory(app, 9001):
             resp = _paid_call(9001, content_type="application/json; charset=utf-8")
         assert resp.status_code == 200
-        assert "tools" in resp.json()["result"]
+        assert "No report with id" in resp.json()["result"]["content"][0]["text"]
 
     def test_application_json_with_extra_params_unaffected(self, server_factory):
         with server_factory(app, 9002):
             resp = _paid_call(9002, content_type="application/json; charset=utf-8; boundary=x")
         assert resp.status_code == 200
-        assert "tools" in resp.json()["result"]
+        assert "No report with id" in resp.json()["result"]["content"][0]["text"]

@@ -9,6 +9,10 @@ of failing the replay.
 These tests drive the real deployed app end to end (unpaid -> 402 -> signed
 replay), varying only the body, to prove the fix without touching anything
 else in the request.
+
+The trigger call is a tools/call (get_report), not tools/list -- since
+_MCPHandshakeExemption made tools/list free, only tools/call still reliably
+produces the 402 -> signed-replay round trip these tests are built around.
 """
 from __future__ import annotations
 
@@ -21,7 +25,8 @@ from preflight.app import app
 from test_x402_seller import _sign
 
 URL_TMPL = "http://127.0.0.1:{port}/mcp/"
-BODY = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+BODY = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+       "params": {"name": "get_report", "arguments": {"report_id": "nope"}}}
 
 
 def _get_challenge(port: int) -> dict:
@@ -88,11 +93,11 @@ class TestWellFormedCallsUnaffected:
     """Real, well-formed JSON-RPC calls must see no change at all -- the
     shim only touches bodies that would otherwise fail to parse/validate."""
 
-    def test_valid_tools_list_call_unaffected(self, server_factory):
+    def test_valid_tools_call_unaffected(self, server_factory):
         with server_factory(app, 9014):
             resp = _paid_call(9014, content=jsonlib.dumps(BODY).encode())
         assert resp.status_code == 200
-        assert "tools" in resp.json()["result"]
+        assert "No report with id" in resp.json()["result"]["content"][0]["text"]
 
     def test_call_to_unknown_method_still_a_normal_jsonrpc_error(self, server_factory):
         """A syntactically valid JSON-RPC call to a method that doesn't
